@@ -1,0 +1,27 @@
+{
+  "name": "telenot-web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Setup-Weboberfläche der Telenot-Bridge (Preact, Single-Bundle für ESP32/LittleFS).",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "lint": "eslint src",
+    "e2e": "playwright test",
+    "e2e:headed": "playwright test --headed",
+    "e2e:sec": "playwright test --project=e2e"
+  },
+  "dependencies": {
+    "preact": "^10.29.7",
+    "qrcode-generator": "^2.0.4"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.61.1",
+    "eslint": "^10.6.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "vite": "^8.1.4",
+    "vite-plugin-singlefile": "^2.3.3"
+  }
+}

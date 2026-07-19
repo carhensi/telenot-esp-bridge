@@ -1,0 +1,66 @@
+{
+  "central": {
+    "sicherungsbereich": [
+      {
+        "hex": "0x0",
+        "name": "sb_main",
+        "name_ha": "Sicherungsbereich",
+        "type": "sicherung",
+        "topic": "telenot/alarm/central/sb",
+        "location": "Zentrale",
+        "inverted": false
+      }
+    ],
+    "meldebereiche": [
+      {
+        "hex": "0x40",
+        "name": "unscharf",
+        "name_ha": "Unscharf",
+        "type": "systemstatus",
+        "topic": "telenot/alarm/central/unscharf",
+        "location": "Zentrale",
+        "inverted": true
+      },
+      {
+        "hex": "0x42",
+        "name": "extern_scharf",
+        "name_ha": "Extern Scharf",
+        "type": "systemstatus",
+        "topic": "telenot/alarm/central/extern_scharf",
+        "location": "Zentrale",
+        "inverted": true
+      },
+      {
+        "hex": "0x85",
+        "name": "contact_mixed",
+        "name_ha": "Kontakt in gemischter Gruppe",
+        "type": "magnetkontakt",
+        "topic": "telenot/alarm/central/contact_mixed",
+        "location": "Zentrale",
+        "inverted": true
+      }
+    ]
+  },
+  "floor": {
+    "meldegruppen": [
+      {
+        "hex": "0x075",
+        "name": "motion_a",
+        "name_ha": "Bewegung A",
+        "type": "bewegungsmelder",
+        "topic": "telenot/alarm/floor/room_a/motion",
+        "location": "Raum A",
+        "inverted": true
+      },
+      {
+        "hex": "0x088",
+        "name": "window_b",
+        "name_ha": "Fenster B",
+        "type": "magnetkontakt",
+        "topic": "telenot/alarm/floor/room_b/window",
+        "location": "Raum B",
+        "inverted": true
+      }
+    ]
+  }
+}

@@ -1,0 +1,63 @@
+# Standalone-Crate: NICHT im Host-Workspace (eigener Xtensa-Target + esp-Toolchain).
+# Leeres [workspace] macht dieses Crate zu seinem eigenen Workspace-Root und stoppt
+# die Aufwärts-Suche zum Repo-Root (das es zusätzlich via `exclude` ausklammert).
+[workspace]
+
+[package]
+name = "telenot-esp-bridge"
+# CalVer (HA-Stil): JAHR.MONAT.PATCH — nur Punkte, streng aufsteigend (der Update-
+# Check vergleicht numerisch; Bindestriche würden als Suffix abgeschnitten).
+# Muss mit dem Release-Tag übereinstimmen (vJAHR.MONAT.PATCH) — CI prüft das.
+version = "2026.7.0"
+description = "esp-idf I/O-Schale für die Telenot-Bridge (Phase B) — Transport/Server/Secrets auf ESP32-POE-ISO."
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Carsten Hensiek"]
+resolver = "2"
+
+[[bin]]
+name = "telenot-esp-bridge"
+harness = false
+
+[profile.release]
+opt-level = "s"
+lto = true
+# Integer-Overflow → sauberer Panic/Reboot statt stillem Wrap-Around (relevant bei
+# Adress-/Längen-Arithmetik auf untrusted GMS-Frames). Kostet ~1–3 % Codegröße —
+# die 3-MB-App-Partition hat reichlich Luft. Nach Änderung: On-Device-Smoke-Test.
+overflow-checks = true
+
+[profile.dev]
+debug = true
+# NICHT "z": aggressive Size-Opt miscompiliert argon2/blake2 auf Xtensa (Block::as_bytes_mut
+# → leerer Slice → OutputTooShort). opt-level=1 vermeidet das und hält argon2 schnell genug.
+opt-level = 1
+
+[dependencies]
+log = "0.4"
+esp-idf-svc = "0.52"
+# Portable Telenot-Logik (trotz Workspace-`exclude` via Pfad nutzbar). std ist via
+# build-std erfüllt; -core/-protocol kommen transitiv über -app.
+telenot-app = { path = "../telenot-app" }
+telenot-config = { path = "../telenot-config" }
+telenot-core = { path = "../telenot-core" }
+# PBKDF2-HMAC-SHA256 für PIN/Login-Hash (Doku erlaubt Argon2 ODER PBKDF2). Bewusst NICHT
+# argon2: dessen blake2-Speicherblöcke werden auf Xtensa fehlkompiliert (OOB-Write → IDLE-
+# Stack-Overflow). PBKDF2/SHA256 ist RAM-leicht und auf ESP32 robust. Salt vom HW-RNG.
+pbkdf2 = { version = "0.12", default-features = false, features = ["simple"] }
+# JSON für persistierte MQTT-Settings (mqtt_cfg-NVS-Blob) + Diagnose-Payloads.
+serde_json = "1"
+# Base64 für die PEM-Kodierung des TOFU-gepinnten Broker-Zertifikats.
+base64 = "0.22"
+
+[build-dependencies]
+embuild = "0.33"
+
+# --- Direkt-HomeKit (HAP) — Phase 0 Spike ---
+# Espressifs esp-homekit-sdk als vendored ESP-IDF-Component ins Build ziehen + FFI-Bindings gegen
+# die HAP-Header generieren. Die transitiven Deps (json_generator/json_parser/libsodium/mdns)
+# deklarieren die Sub-Components selbst via idf_component.yml (Component-Manager löst sie auf).
+[[package.metadata.esp-idf-sys.extra_components]]
+component_dirs = ["components/esp-homekit-sdk/components/homekit"]
+bindings_header = "src/homekit_sys.h"
+bindings_module = "homekit"

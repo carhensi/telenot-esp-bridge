@@ -1,0 +1,15 @@
+[package]
+name = "telenot-core"
+version = "0.0.0"
+description = "Sans-IO Kern der Telenot-Bridge: Link-Layer, State-Store, Fail-Safe, Command-Reducer."
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+telenot-protocol = { path = "../telenot-protocol" }
+telenot-config = { path = "../telenot-config" }
+
+[lints]
+workspace = true

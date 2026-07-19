@@ -1,0 +1,190 @@
+/* ============================================================
+   Bridge Setup — Design Tokens
+   Rollenbasiert / semantisch. Hex nie direkt in Komponenten.
+   Light = :root, Dark = [data-theme="dark"] Override.
+   Alle Farben in oklch. Kein Web-Font (Bundle-Budget).
+   ============================================================ */
+
+:root {
+  /* --- Type --- */
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  --text-xs: 0.75rem;    /* 12 */
+  --text-sm: 0.8125rem;  /* 13 */
+  --text-base: 1rem;     /* 16 — body, verhindert iOS-Zoom */
+  --text-lg: 1.125rem;   /* 18 */
+  --text-xl: 1.375rem;   /* 22 */
+  --text-2xl: 1.75rem;   /* 28 */
+  --text-3xl: 2.25rem;   /* 36 */
+
+  --leading-tight: 1.25;
+  --leading-normal: 1.55;
+
+  --fw-regular: 400;
+  --fw-medium: 530;
+  --fw-semibold: 640;
+
+  /* --- Spacing (4px Basis) --- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+
+  /* --- Radius (klein, technischer Charakter) --- */
+  --radius-sm: 5px;
+  --radius-md: 8px;
+  --radius-lg: 13px;
+  --radius-full: 999px;
+
+  /* --- Akzent-Hue (per Tweaks umschaltbar) --- */
+  --accent-h: 264;
+  --accent-c: 0.118;
+
+  /* ===== LIGHT THEME ===== */
+  --bg-base: oklch(0.985 0.003 255);
+  --bg-surface: oklch(1 0 0);
+  --bg-elevated: oklch(1 0 0);
+  --bg-sunken: oklch(0.965 0.004 255);
+  --bg-inset: oklch(0.945 0.006 255);
+
+  --fg-default: oklch(0.255 0.014 268);
+  --fg-muted: oklch(0.505 0.014 263);
+  --fg-subtle: oklch(0.635 0.012 263);
+  --fg-onaccent: oklch(0.99 0.005 255);
+
+  --border-default: oklch(0.915 0.005 263);
+  --border-strong: oklch(0.85 0.008 263);
+  --border-hair: oklch(0.945 0.004 263);
+
+  --accent: oklch(0.515 var(--accent-c) var(--accent-h));
+  --accent-hover: oklch(0.46 var(--accent-c) var(--accent-h));
+  --accent-fg: var(--fg-onaccent);
+  --accent-soft: oklch(0.955 0.022 var(--accent-h));
+  --accent-soft-border: oklch(0.89 0.045 var(--accent-h));
+
+  --focus-ring: oklch(0.58 0.16 var(--accent-h));
+
+  /* semantische States: -fg (Text/Icon auf soft), -bg (soft Fläche), -border, -solid (Dot/Akzentlinie) */
+  --state-ok-fg: oklch(0.42 0.10 152);
+  --state-ok-bg: oklch(0.955 0.035 152);
+  --state-ok-border: oklch(0.86 0.07 152);
+  --state-ok-solid: oklch(0.58 0.13 152);
+
+  --state-warn-fg: oklch(0.46 0.09 75);
+  --state-warn-bg: oklch(0.965 0.05 80);
+  --state-warn-border: oklch(0.86 0.09 80);
+  --state-warn-solid: oklch(0.72 0.13 75);
+
+  --state-alarm-fg: oklch(0.48 0.17 27);
+  --state-alarm-bg: oklch(0.962 0.035 27);
+  --state-alarm-border: oklch(0.87 0.09 27);
+  --state-alarm-solid: oklch(0.565 0.205 27);
+
+  --state-unavail-fg: oklch(0.48 0.012 263);
+  --state-unavail-bg: oklch(0.95 0.005 263);
+  --state-unavail-border: oklch(0.88 0.006 263);
+  --state-unavail-solid: oklch(0.62 0.012 263);
+
+  /* unconfirmed: eigener Token, NIE mit warn verschmelzen — zentraler Trust-Cue */
+  --state-unconfirmed-fg: oklch(0.45 0.16 305);
+  --state-unconfirmed-bg: oklch(0.962 0.035 305);
+  --state-unconfirmed-border: oklch(0.87 0.075 305);
+  --state-unconfirmed-solid: oklch(0.56 0.19 305);
+
+  /* armed/disarmed: eigene Rollen, armed ist KEIN Alarm */
+  --state-armed-fg: oklch(0.42 0.11 232);
+  --state-armed-bg: oklch(0.955 0.04 232);
+  --state-armed-border: oklch(0.85 0.08 232);
+  --state-armed-solid: oklch(0.52 0.13 232);
+
+  --state-disarmed-fg: oklch(0.5 0.012 263);
+  --state-disarmed-bg: oklch(0.95 0.005 263);
+  --state-disarmed-border: oklch(0.88 0.006 263);
+  --state-disarmed-solid: oklch(0.62 0.012 263);
+
+  /* --- Elevation (sparsam) --- */
+  --elev-0: none;
+  --elev-1: 0 1px 2px oklch(0.4 0.02 263 / 0.06), 0 1px 1px oklch(0.4 0.02 263 / 0.04);
+  --elev-2: 0 4px 12px oklch(0.35 0.03 263 / 0.10), 0 1px 3px oklch(0.35 0.03 263 / 0.07);
+  --elev-3: 0 18px 50px oklch(0.3 0.03 263 / 0.22), 0 6px 16px oklch(0.3 0.03 263 / 0.14);
+
+  --overlay-scrim: oklch(0.2 0.02 263 / 0.42);
+
+  --row-h: 52px;
+  --tap: 44px;
+}
+
+/* ===== DARK THEME (nur Token-Override) ===== */
+[data-theme="dark"] {
+  --bg-base: oklch(0.185 0.008 263);
+  --bg-surface: oklch(0.225 0.009 263);
+  --bg-elevated: oklch(0.262 0.010 263);
+  --bg-sunken: oklch(0.165 0.008 263);
+  --bg-inset: oklch(0.158 0.008 263);
+
+  --fg-default: oklch(0.945 0.006 263);
+  --fg-muted: oklch(0.72 0.01 263);
+  --fg-subtle: oklch(0.58 0.01 263);
+  --fg-onaccent: oklch(0.99 0.005 255);
+
+  --border-default: oklch(0.32 0.011 263);
+  --border-strong: oklch(0.4 0.013 263);
+  --border-hair: oklch(0.285 0.01 263);
+
+  --accent: oklch(0.66 0.135 var(--accent-h));
+  --accent-hover: oklch(0.72 0.135 var(--accent-h));
+  --accent-fg: oklch(0.16 0.02 var(--accent-h));
+  --accent-soft: oklch(0.3 0.05 var(--accent-h));
+  --accent-soft-border: oklch(0.42 0.08 var(--accent-h));
+
+  --focus-ring: oklch(0.72 0.14 var(--accent-h));
+
+  --state-ok-fg: oklch(0.82 0.13 152);
+  --state-ok-bg: oklch(0.32 0.06 152);
+  --state-ok-border: oklch(0.45 0.09 152);
+  --state-ok-solid: oklch(0.68 0.14 152);
+
+  --state-warn-fg: oklch(0.86 0.12 82);
+  --state-warn-bg: oklch(0.34 0.06 70);
+  --state-warn-border: oklch(0.48 0.08 70);
+  --state-warn-solid: oklch(0.78 0.14 80);
+
+  --state-alarm-fg: oklch(0.82 0.13 30);
+  --state-alarm-bg: oklch(0.34 0.09 28);
+  --state-alarm-border: oklch(0.48 0.13 28);
+  --state-alarm-solid: oklch(0.66 0.2 28);
+
+  --state-unavail-fg: oklch(0.72 0.012 263);
+  --state-unavail-bg: oklch(0.3 0.008 263);
+  --state-unavail-border: oklch(0.4 0.01 263);
+  --state-unavail-solid: oklch(0.6 0.012 263);
+
+  --state-unconfirmed-fg: oklch(0.84 0.13 306);
+  --state-unconfirmed-bg: oklch(0.33 0.08 306);
+  --state-unconfirmed-border: oklch(0.47 0.12 306);
+  --state-unconfirmed-solid: oklch(0.68 0.17 306);
+
+  --state-armed-fg: oklch(0.82 0.12 233);
+  --state-armed-bg: oklch(0.32 0.07 233);
+  --state-armed-border: oklch(0.46 0.1 233);
+  --state-armed-solid: oklch(0.66 0.13 233);
+
+  --state-disarmed-fg: oklch(0.72 0.012 263);
+  --state-disarmed-bg: oklch(0.3 0.008 263);
+  --state-disarmed-border: oklch(0.4 0.01 263);
+  --state-disarmed-solid: oklch(0.6 0.012 263);
+
+  --elev-1: 0 1px 2px oklch(0 0 0 / 0.4), 0 1px 1px oklch(0 0 0 / 0.3);
+  --elev-2: 0 4px 14px oklch(0 0 0 / 0.5), 0 1px 3px oklch(0 0 0 / 0.4);
+  --elev-3: 0 20px 56px oklch(0 0 0 / 0.62), 0 8px 18px oklch(0 0 0 / 0.5);
+  --overlay-scrim: oklch(0.08 0.01 263 / 0.62);
+}
+
+/* Dichte-Varianten (Tweaks) */
+[data-density="compact"] { --row-h: 44px; }
+[data-density="cozy"] { --row-h: 60px; }

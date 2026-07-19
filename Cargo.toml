@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/telenot-protocol",
+    "crates/telenot-config",
+    "crates/telenot-core",
+    "crates/telenot-app",
+    "crates/telenot-sim",
+]
+# telenot-esp-bridge ist Xtensa/esp-idf (eigene Toolchain) — nicht host-baubar, daher raus.
+# fuzz braucht nightly (cargo-fuzz/Sanitizer) — ebenfalls eigenes Workspace-Root.
+exclude = ["crates/telenot-esp-bridge", "fuzz"]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Carsten Hensiek"]
+# Interne Crates — nie auf crates.io publishen (schützt auch vor versehentlichem
+# `cargo publish`; cargo-deny erlaubt Path-Deps ohne Version nur für private Crates).
+publish = false
+
+# Ein zentraler Ort statt 5 identischer [lints.rust]-Blöcke; die Crates erben via
+# [lints] workspace = true. telenot-esp-bridge ist eigenes Workspace (braucht FFI-unsafe).
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+# Host-Binaries (Sim/Tooling): Overflow-Checks kosten hier nichts Relevantes,
+# machen Wrap-Arounds bei Adress-/Längen-Arithmetik aber zu sauberen Panics.
+[profile.release]
+overflow-checks = true

@@ -1,0 +1,21 @@
+[package]
+name = "telenot-app"
+version = "0.0.0"
+description = "Portable Service-/REST-Schicht der Telenot-Bridge: DTOs, reine API-Handler, sans-IO Runtime. Geteilt von Host-Daemon und Firmware; keine HTTP-/Async-/esp-Abhängigkeiten."
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+telenot-protocol = { path = "../telenot-protocol" }
+telenot-config = { path = "../telenot-config" }
+telenot-core = { path = "../telenot-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# SHA-256 fürs OTA-Image (Upload-Verifikation); re-exportiert via `ota::Sha256`,
+# damit Firmware und Sim denselben Hasher nutzen. Pure Rust.
+sha2 = { version = "0.10", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true

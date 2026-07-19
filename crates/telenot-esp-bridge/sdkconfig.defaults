@@ -1,0 +1,39 @@
+# Größerer Main-Stack: Argon2-Hashing (Scheibe 3) und später TLS/HTTP brauchen Platz.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+
+# 16 MB Flash (Olimex ESP32-POE-ISO-16MB), s. docs/HARDWARE.md
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+# Task-Watchdog großzügiger: PBKDF2-Hashing (pure-Rust-SHA, kein HW-Beschleuniger) hält
+# den Main-Task kurzzeitig am Stück. Im normalen Poll-Loop (yield alle 80 ms) unkritisch.
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
+
+# TOFU-Cert-Pinning (mqtt.rs::fetch_peer_cert): mbedtls muss das Peer-Zertifikat NACH dem
+# Handshake behalten, sonst liefert mbedtls_ssl_get_peer_cert NULL. Default ist zwar y, aber
+# explizit gepinnt, damit der Fingerprint-Abruf zuverlässig funktioniert.
+CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE=y
+
+# --- A/B-OTA mit Rollback ---
+# ACHTUNG: Das ist eine BOOTLOADER-Option — sie wirkt nur, wenn auch der von esp-idf-sys
+# gebaute Bootloader geflasht wird (target/.../bootloader.bin, s. Runner + release.yml).
+# Der espflash-Default-Bootloader wertet PENDING_VERIFY nicht aus → Rollback wäre still tot.
+# Neue Firmware bootet als PENDING_VERIFY; erst mark_running_slot_valid() (nach dem
+# Self-Test im app_loop) macht sie dauerhaft. Panic/Reboot vorher → automatischer Rollback.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# --- Direkt-HomeKit (HAP) — Phase 0 Spike ---
+# Custom Partition-Table mit `factory_nvs` (hap_keystore_init erwartet sie). WICHTIG: `nvs` bleibt
+# bei 0x9000/0x6000 → bestehendes Config/MQTT/Passwort-NVS überlebt. Der Pfad kommt per Maschine
+# berechnet aus der Env-Var PARTITION_TABLE_CSV (.cargo/config.toml, relative=true) — CMake expandiert
+# $ENV{...} zur Konfigurationszeit. Kein hartkodierter User; esp-idf-sys sucht die CSV sonst im Build-Dir.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="$ENV{PARTITION_TABLE_CSV}"
+# HAP hält mehrere gleichzeitige Sessions + eigenen HTTP-Server → mehr LWIP-Sockets.
+CONFIG_LWIP_MAX_SOCKETS=16
+# HW-beschleunigte Bignum-Ops für die HAP-Crypto (SRP/curve25519) — spürbar schneller beim Pairing.
+CONFIG_MBEDTLS_HARDWARE_MPI=y
+# HAP-HTTP-Server auf eigenen Port (Setup-Web bleibt dauerhaft auf 80). Apple findet das
+# Accessory ohnehin per `_hap._tcp`-mDNS (Port steht im SRV-Record) → Portwahl ist beliebig.
+# So können Setup-Web und HAP koexistieren und HomeKit ohne Reboot live starten.
+CONFIG_HAP_HTTP_SERVER_PORT=8080

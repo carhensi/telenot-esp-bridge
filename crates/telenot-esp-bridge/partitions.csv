@@ -1,0 +1,21 @@
+# Custom Partition-Table (16 MB) — A/B-OTA-Layout. `nvs` bleibt bei 0x9000/0x6000 wie im
+# ESP-IDF-Default. ACHTUNG: Der Wechsel vom alten factory-Layout auf dieses Layout ist ein
+# EINMALIGER Voll-Erase per Kabel (Kabel-Flash-Regeln: docs/HARDWARE.md) — danach nur noch OTA.
+# App-Partitionen müssen 64-KB-aligned sein (0x20000/0x420000 ✓).
+# Name,        Type, SubType,  Offset,    Size
+nvs,           data, nvs,      0x9000,    0x6000,
+phy_init,      data, phy,      0xf000,    0x1000,
+# Bootwahl-Zustand für A/B (welcher Slot bootet, PENDING_VERIFY/VALID/INVALID).
+otadata,       data, ota,      0x10000,   0x2000,
+# 0x12000–0x20000 frei (Alignment-Padding).
+ota_0,         app,  ota_0,    0x20000,   0x400000,
+ota_1,         app,  ota_1,    0x420000,  0x400000,
+# HAP-Pairing-Keys (Direkt-HomeKit) — eigenes NVS.
+factory_nvs,   data, nvs,      0x820000,  0x6000,
+# Sensor-Config als JSON-Blob: die 24-KB-Default-NVS reicht dafür NICHT (131 Sensoren
+# ≈ 30 KB JSON → set_blob scheiterte still, Config war nach Reboot weg). Eigene Partition.
+cfg,           data, nvs,      0x826000,  0x20000,
+# Reserviert für Post-Mortem-Coredumps (Feature kommt später; jetzt reservieren erspart
+# eine weitere Migrations-Runde).
+coredump,      data, coredump, 0x846000,  0x10000,
+# ~7,66 MB Reserve ab 0x856000 (künftige Daten-/Log-Partition).

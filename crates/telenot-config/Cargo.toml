@@ -1,0 +1,17 @@
+[package]
+name = "telenot-config"
+version = "0.0.0"
+description = "Sensor-/Geräte-Konfiguration der Telenot-Bridge: Schema, Validierung, Migration."
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Kompaktes Binärformat für das Chunked-NVS-Storage (serde-kompatibel, no_std-tauglich).
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+
+[lints]
+workspace = true

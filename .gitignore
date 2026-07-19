@@ -1,0 +1,34 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# esp-idf Firmware-Crate: Build-Artefakte + heruntergeladenes ESP-IDF
+crates/telenot-esp-bridge/target/
+crates/telenot-esp-bridge/.embuild/
+crates/telenot-esp-bridge/sdkconfig
+crates/telenot-esp-bridge/sdkconfig.old
+
+# lokales Referenzmaterial (echte Config/Logs) nicht versionieren
+/reference
+
+.DS_Store
+**/.DS_Store
+
+# keine PDFs versionieren (lokale Referenzen/Datenblätter/Notizen bleiben lokal).
+# Legitime PDFs bei Bedarf bewusst per `git add -f`.
+*.pdf
+
+# persönliches Setup (echte Sensor-/Adress-Zuordnung) — nicht versionieren
+docs/mein-setup/
+
+# lokale Claude-Code-Tooling-Zustände (Pläne/Memory)
+.claude/
+
+# cargo-fuzz: Build-Artefakte + lokal akkumulierter Corpus (CI cached eigenen)
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/coverage/
+
+# generierte Demo-Medien (Playwright-Speedrun) — zu groß fürs Repo
+demo/

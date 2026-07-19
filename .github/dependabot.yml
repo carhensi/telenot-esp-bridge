@@ -1,0 +1,38 @@
+# Dependabot: wöchentlich, minor/patch gebündelt (weniger PRs = weniger CI-Minuten
+# auf dem privaten Repo). Majors kommen einzeln — die will man bewusst reviewen.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Host-Workspace (protocol/config/core/app/sim)
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo-minor-patch:
+        update-types: [minor, patch]
+
+  # Firmware-Crate ist ein eigener Workspace (xtensa). Achtung bei esp-idf-sys/esp-idf-svc:
+  # Bumps hier nur mergen, wenn die Firmware lokal warning-frei baut (CI baut xtensa nicht).
+  - package-ecosystem: cargo
+    directory: /crates/telenot-esp-bridge
+    schedule:
+      interval: weekly
+    groups:
+      esp-minor-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+    groups:
+      npm-minor-patch:
+        update-types: [minor, patch]
