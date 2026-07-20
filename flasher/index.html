@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>telenot-esp-bridge — Web-Flasher</title>
+  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+  <style>
+    /* Design-Sprache des Setup-Web (web/src/*.css): oklch, Hue 263, technisch-dunkel. */
+    :root {
+      --bg-base: oklch(0.185 0.008 263);
+      --bg-surface: oklch(0.225 0.009 263);
+      --bg-inset: oklch(0.158 0.008 263);
+      --border: oklch(0.32 0.011 263);
+      --border-strong: oklch(0.4 0.013 263);
+      --text: oklch(0.93 0.005 263);
+      --text-dim: oklch(0.72 0.01 263);
+      --accent: oklch(0.66 0.135 264);
+      --accent-hover: oklch(0.72 0.135 264);
+      --accent-fg: oklch(0.16 0.02 264);
+      --danger: oklch(0.68 0.19 25);
+      --danger-soft: oklch(0.28 0.06 25);
+      --danger-border: oklch(0.45 0.12 25);
+      --info-soft: oklch(0.28 0.05 264);
+      --info-border: oklch(0.42 0.08 264);
+      --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 48px 16px 64px;
+      background: var(--bg-base); color: var(--text);
+      font: 400 1rem/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    main { max-width: 42rem; margin: 0 auto; }
+    .kicker {
+      font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.12em;
+      text-transform: uppercase; color: var(--accent); margin: 0 0 8px;
+    }
+    h1 { font-size: 1.75rem; line-height: 1.25; margin: 0 0 4px; font-weight: 640; }
+    .version { font-family: var(--mono); color: var(--text-dim); font-size: 0.8125rem; margin: 0 0 24px; }
+    .lede { color: var(--text-dim); margin: 0 0 32px; }
+    .card {
+      background: var(--bg-surface); border: 1px solid var(--border);
+      border-radius: 8px; padding: 20px 24px; margin: 0 0 16px;
+    }
+    .card h2 { font-size: 1.125rem; margin: 0 0 12px; font-weight: 640; }
+    ol { margin: 0; padding-left: 22px; }
+    ol li { margin-bottom: 10px; }
+    ol li:last-child { margin-bottom: 0; }
+    .warn {
+      border-radius: 8px; padding: 14px 18px; margin: 0 0 12px;
+      background: var(--danger-soft); border: 1px solid var(--danger-border);
+      font-size: 0.9rem;
+    }
+    .warn strong { color: var(--danger); }
+    .note {
+      border-radius: 8px; padding: 14px 18px; margin: 0 0 12px;
+      background: var(--info-soft); border: 1px solid var(--info-border);
+      font-size: 0.9rem; color: var(--text-dim);
+    }
+    .note strong { color: var(--text); }
+    .flashrow { display: flex; align-items: center; gap: 16px; margin: 28px 0 8px; flex-wrap: wrap; }
+    esp-web-install-button button {
+      background: var(--accent); color: var(--accent-fg);
+      border: 0; border-radius: 8px; padding: 12px 28px;
+      font: 640 1rem/1 inherit; cursor: pointer;
+    }
+    esp-web-install-button button:hover { background: var(--accent-hover); }
+    esp-web-install-button [slot="unsupported"],
+    esp-web-install-button [slot="not-allowed"] {
+      color: var(--danger); font-size: 0.9rem;
+    }
+    code {
+      font-family: var(--mono); font-size: 0.85em;
+      background: var(--bg-inset); border: 1px solid var(--border);
+      border-radius: 4px; padding: 1px 5px;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    footer {
+      margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--border);
+      color: var(--text-dim); font-size: 0.8125rem;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="kicker">Telenot complex 400 → HomeKit &amp; Home Assistant</p>
+    <h1>telenot-esp-bridge flashen</h1>
+    <p class="version">Firmware-Version __VERSION__ · Olimex ESP32-POE-ISO-16MB</p>
+    <p class="lede">
+      Firmware direkt aus dem Browser auf das Board flashen — ohne Toolchain, ohne
+      Kommandozeile. Board per <strong>Micro-USB</strong> verbinden, Button klicken, fertig.
+    </p>
+
+    <div class="warn">
+      ⚠️ <strong>Nie flashen, solange die RS232 an der Zentrale hängt.</strong>
+      Der USB-Anschluss (CH340) bindet die PC-Masse an den ESP — mit angeschlossener
+      RS232 entsteht eine Masseschleife über die Telenot. Vor dem Flashen das
+      UEXT-/RS232-Kabel ziehen.
+    </div>
+
+    <div class="warn">
+      ⚠️ <strong>„Erase device" löscht den gesamten Flash</strong> — Sensor-Konfiguration,
+      MQTT-Zugangsdaten und das <strong>HomeKit-Pairing</strong> gehen verloren
+      (Anlage muss in der Home-App neu gekoppelt werden). Beim <em>Update</em> einer
+      laufenden Installation die Lösch-Option daher <strong>nicht</strong> anhaken —
+      nur bei der Erstinstallation.
+    </div>
+
+    <div class="note">
+      <strong>Voraussetzungen:</strong> Chrome/Edge (ab 89) oder Firefox (ab 151) —
+      Safari und iOS unterstützen Web Serial nicht. Unter Windows und älterem macOS
+      ggf. den <a href="https://sparks.gogo.co.nz/ch340.html" rel="noopener">CH340-Treiber</a>
+      installieren.
+    </div>
+
+    <div class="card">
+      <h2>So geht's</h2>
+      <ol>
+        <li>RS232-/UEXT-Kabel vom Board <strong>abziehen</strong> (siehe Warnung oben), dann das Board per <strong>Micro-USB</strong> mit dem Rechner verbinden.</li>
+        <li>Unten auf <strong>„Firmware installieren"</strong> klicken und im Browser-Dialog den seriellen Port wählen (meist <code>USB Serial</code> / <code>wchusbserial</code>).</li>
+        <li>Nach dem Flashen: Board in die Anlage zurück, PoE dran — das <strong>Setup-Web</strong> ist die ersten 30 Minuten nach dem Boot erreichbar (danach per Taster BUT1 wieder zu öffnen).</li>
+      </ol>
+    </div>
+
+    <div class="flashrow">
+      <esp-web-install-button manifest="manifest.json">
+        <button slot="activate">Firmware installieren</button>
+        <span slot="unsupported">Dieser Browser unterstützt Web Serial nicht — bitte Chrome, Edge oder Firefox ≥ 151 verwenden.</span>
+        <span slot="not-allowed">Web Serial ist nur über HTTPS (oder localhost) verfügbar.</span>
+      </esp-web-install-button>
+    </div>
+
+    <footer>
+      <a href="https://github.com/carhensi/telenot-esp-bridge">GitHub-Repo</a> ·
+      <a href="https://github.com/carhensi/telenot-esp-bridge/blob/main/docs/HARDWARE.md">Hardware-Doku</a> ·
+      SHA-256-Prüfsummen: <a href="https://github.com/carhensi/telenot-esp-bridge/releases">Release-Assets</a>
+      <br />Flasht via <a href="https://esphome.github.io/esp-web-tools/" rel="noopener">ESP Web Tools</a>.
+      Die Bridge ist keine Sicherheits-Komponente der EMA — Threat-Model im Repo.
+    </footer>
+  </main>
+</body>
+</html>

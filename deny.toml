@@ -1,0 +1,38 @@
+# cargo-deny-Konfiguration (Host-Workspace).
+# Das Firmware-Workspace (crates/telenot-esp-bridge, esp-Toolchain) wird separat
+# per `cargo audit --file crates/telenot-esp-bridge/Cargo.lock` geprüft — reiner
+# Lockfile-Scan, braucht keine xtensa-Toolchain. Siehe .github/workflows/security.yml.
+
+[graph]
+all-features = true
+
+[advisories]
+# Vulnerabilities = Fehler (Default). Yanked Crates ebenfalls hart ablehnen;
+# "unmaintained" bleibt Warnung, damit Hobby-Crate-Churn die CI nicht rot macht.
+yanked = "deny"
+
+[licenses]
+# Repo ist Apache-2.0; Allowlist der kompatiblen permissiven Lizenzen im Dep-Tree.
+allow = [
+  "Apache-2.0",
+  "MIT",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+]
+
+[bans]
+# Mehrfach-Versionen nur warnen (deny wäre für ein Hobby-Projekt Dauerrauschen),
+# Wildcard-Dependencies aber hart verbieten.
+multiple-versions = "warn"
+wildcards = "deny"
+# Versionslose Path-Deps innerhalb des Workspaces (telenot-*) sind okay —
+# der Wildcard-Check zielt auf Registry-Deps mit version = "*".
+allow-wildcard-paths = true
+
+[sources]
+# Alle Dependencies kommen von crates.io — alles andere ist ein Supply-Chain-Signal.
+unknown-registry = "deny"
+unknown-git = "deny"

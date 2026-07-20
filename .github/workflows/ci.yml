@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test + clippy + fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Rust-Toolchain (stable + Komponenten)
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
+      - name: Cargo-Cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+      - name: Format prüfen
+        run: cargo fmt --all --check
+      - name: Clippy (Warnungen = Fehler)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --workspace
+
+  # Ohne diesen Job hätten npm-Dependabot-PRs ein nichtssagendes grünes Häkchen
+  # (der Cargo-Job prüft web/ nicht). Enthält zusätzlich die funktionale E2E-Suite
+  # (Playwright gegen telenot-sim) — das Sicherheitsnetz fürs Web-Frontend.
+  web:
+    name: web lint + build + e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Cargo-Cache (für den Sim-Build der E2E-Tests)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+      - name: Install
+        run: npm --prefix web ci
+      - name: ESLint (0 Errors Pflicht)
+        run: npm --prefix web run lint
+      - name: Build (Single-Bundle)
+        run: npm --prefix web run build
+      # E2E: Sim bauen (Host-Workspace, keine esp-Toolchain) + headless Chromium.
+      # Playwright startet den Sim selbst (webServer in playwright.config.js).
+      - name: telenot-sim bauen
+        run: cargo build --release -p telenot-sim
+      - name: Playwright-Chromium
+        run: npm --prefix web exec -- playwright install --with-deps chromium
+      - name: E2E (Security-Suite gegen den Sim)
+        run: npm --prefix web run e2e:sec

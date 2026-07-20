@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "sensors": [
+    {
+      "address": 66,
+      "name": "MK Haustür",
+      "name_ha": "MK Haustür",
+      "kind": "magnetkontakt",
+      "topic": "haustuer",
+      "location": "Erdgeschoss",
+      "polarity": "active_low",
+      "confirmed": true,
+      "switchable": false,
+      "show_in_homekit": true
+    },
+    {
+      "address": 80,
+      "name": "BM Flur",
+      "name_ha": "BM Flur",
+      "kind": "bewegungsmelder",
+      "topic": "flur",
+      "location": "Erdgeschoss",
+      "polarity": "active_low",
+      "confirmed": true,
+      "switchable": false,
+      "show_in_homekit": true
+    }
+  ]
+}

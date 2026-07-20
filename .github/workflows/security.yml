@@ -1,0 +1,127 @@
+name: Security
+
+# Dependency-Audits + Secret-Scan. Der Weekly-Cron sorgt dafür, dass neue
+# RustSec-Advisories auch ohne Push auffallen.
+# ACHTUNG: GitHub deaktiviert schedule-Workflows nach 60 Tagen Repo-Inaktivität —
+# bei längerer Pause einmal manuell re-enablen (Actions → Security → Enable).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "deny.toml"
+      - "web/package.json"
+      - "web/package-lock.json"
+      - ".github/workflows/security.yml"
+      - "crates/telenot-protocol/**"
+      - "crates/telenot-app/**"
+      - "fuzz/**"
+  schedule:
+    - cron: "23 6 * * 1" # montags 06:23 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Advisories + Lizenzen + Bans + Sources fürs Host-Workspace (deny.toml).
+  cargo-deny:
+    name: cargo-deny (Host-Workspace)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+
+  # Das Firmware-Workspace hat toolchain "esp" (xtensa) — cargo-deny würde dort
+  # cargo metadata brauchen. cargo-audit scannt das Lockfile direkt, ohne Build.
+  cargo-audit-firmware:
+    name: cargo-audit (Firmware-Lockfile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+        with:
+          tool: cargo-audit
+      - name: Firmware-Lockfile auditen
+        run: cargo audit --file crates/telenot-esp-bridge/Cargo.lock
+
+  # Das Web-Bundle wird per include_bytes! in die Firmware eingebettet — npm-Vulns
+  # wandern also mit aufs Gerät. Fail ab "high" (moderate wäre Hobby-Projekt-Rauschen;
+  # Dependabot hält die Deps ohnehin wöchentlich aktuell).
+  npm-audit:
+    name: npm audit (web)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Audit
+        run: npm --prefix web audit --audit-level=high
+
+  # Kurzer Fuzz-Lauf über die untrusted-Input-Parser (GMS-Frames, VdS-Sätze,
+  # HTTP-JSON-DTOs). 60 s je Target auf PR/Push; im Weekly-Cron 10 min je Target.
+  # Nightly nur in DIESEM Job (Sanitizer) — die stabilen CI-Jobs bleiben unberührt.
+  fuzz-smoke:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [frame_decoder, record_iter, api_dto]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Nightly-Toolchain
+        run: rustup toolchain install nightly --profile minimal --component rust-src
+      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+        with:
+          tool: cargo-fuzz
+      # Corpus akkumuliert über Läufe — jeder Fund macht spätere Läufe schlauer.
+      - name: Corpus-Cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      # Explizites gnu-Target: das prebuilt cargo-fuzz ist ein musl-Binary und
+      # würde sonst musl als Build-Target wählen — Sanitizer + statisches libc knallt.
+      - name: Fuzzen
+        run: |
+          cargo +nightly fuzz run ${{ matrix.target }} --fuzz-dir fuzz \
+            --target x86_64-unknown-linux-gnu -- \
+            -max_total_time=${{ github.event_name == 'schedule' && 600 || 60 }}
+
+  # Secret-Scan über die komplette Historie — wichtig VOR dem Public-Schalten.
+  # Lizenzfrei für Repos unter persönlichen Accounts.
+  gitleaks:
+    name: gitleaks (Secret-Scan)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read # die Action liest PR-Metadaten; Kommentare sind aus
+    env:
+      GITLEAKS_ENABLE_COMMENTS: "false"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0 # volle Historie scannen
+          persist-credentials: false
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

@@ -1,0 +1,27 @@
+[build]
+target = "xtensa-esp32-espidf"
+
+[target.xtensa-esp32-espidf]
+linker = "ldproxy"
+# `--monitor` öffnet nach dem Flashen direkt den seriellen Monitor (UART0/USB).
+# WICHTIG (A/B-OTA): --bootloader flasht den esp-idf-sys-Bootloader (Rollback-Support —
+# der espflash-Default kann das NICHT); --erase-parts otadata setzt die Bootwahl zurück,
+# sonst bootet nach einem OTA auf ota_1 ein Kabel-Flash von ota_0 nicht. Pfad ist relativ
+# zum Crate (release-Profil — Kabel-Flash machen wir nur im Release).
+runner = "espflash flash --monitor --partition-table partitions.csv --bootloader target/xtensa-esp32-espidf/release/bootloader.bin --erase-parts otadata"
+rustflags = ["--cfg", "espidf_time64"]
+
+[unstable]
+build-std = ["std", "panic_abort"]
+
+[env]
+MCU = "esp32"
+# ESP-IDF auf v5.5.4 gepinnt (Currency-Bump, v5.5.x-LTS bis 2028). v6.0 verworfen: dessen Mbed-TLS-4.0/
+# TF-PSA + Picolibc werden vom released esp-idf-sys 0.37.2 noch nicht unterstützt (esp-rs/esp-idf-sys#421/#410).
+ESP_IDF_VERSION = "v5.5.4"
+ESP_IDF_SDKCONFIG_DEFAULTS = "sdkconfig.defaults"
+# Absoluter Pfad zur Partition-Tabelle, PER MASCHINE berechnet (kein hartkodierter User im Repo).
+# `relative = true` löst gegen das Crate-Verzeichnis (Ort der .cargo/config.toml) auf; in der
+# sdkconfig via $ENV{PARTITION_TABLE_CSV} referenziert (CMake expandiert $ENV{} zur Konfig-Zeit;
+# esp-idf-sys sucht die CSV sonst im generierten Build-Dir statt im Crate).
+PARTITION_TABLE_CSV = { value = "partitions.csv", relative = true, force = true }
