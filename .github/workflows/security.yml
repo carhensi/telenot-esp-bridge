@@ -51,7 +51,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+      - uses: taiki-e/install-action@91ddec75689c4c78665b598d188dc821c5a43e5c # v2.85.9
         with:
           tool: cargo-audit
       - name: Firmware-Lockfile auditen
@@ -89,7 +89,7 @@ jobs:
           persist-credentials: false
       - name: Nightly-Toolchain
         run: rustup toolchain install nightly --profile minimal --component rust-src
-      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+      - uses: taiki-e/install-action@91ddec75689c4c78665b598d188dc821c5a43e5c # v2.85.9
         with:
           tool: cargo-fuzz
       # Corpus akkumuliert über Läufe — jeder Fund macht spätere Läufe schlauer.
