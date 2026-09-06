@@ -19,9 +19,9 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.62.1",
-    "eslint": "^10.8.1",
+    "eslint": "^10.9.1",
     "eslint-plugin-react-hooks": "^7.1.1",
-    "vite": "^8.2.1",
+    "vite": "^8.2.2",
     "vite-plugin-singlefile": "^2.3.3"
   }
 }
