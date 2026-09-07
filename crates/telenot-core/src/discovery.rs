@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use telenot_config::{
     Config, GmsVariant, PanelSettings, Polarity, Sensor, SensorKind, CURRENT_SCHEMA_VERSION,
+    MAX_SENSORS,
 };
 use telenot_protocol::BlockStatus;
 
@@ -38,7 +39,17 @@ impl Discovery {
         for (i, byte) in bs.status.iter().enumerate() {
             for bit in 0..8u16 {
                 if (byte >> bit) & 1 == 0 {
-                    self.occupied.insert(base + i as u16 * 8 + bit);
+                    // saturating: `base` comes off the wire and a corrupted/noisy frame
+                    // could push it near 0xFFFF — must not overflow-panic on scan input.
+                    let addr = base.saturating_add(i as u16 * 8 + bit);
+                    // Cap at the device's own sensor limit: `into_config`/`into_config_for`
+                    // build every sensor from `occupied`, and their `.expect()` on
+                    // `SensorTable::from_sensors` assumes this can never exceed it. Idempotent
+                    // re-insertion of already-known addresses (repeated occupancy telegrams)
+                    // stays allowed even once the cap is hit.
+                    if self.occupied.len() < MAX_SENSORS || self.occupied.contains(&addr) {
+                        self.occupied.insert(addr);
+                    }
                 }
             }
         }
@@ -287,5 +298,36 @@ mod tests {
             "Umlaute transliteriert statt verschluckt"
         );
         assert_eq!(t1, "esg_gehaeuse_0001", "duplicate gets address suffix");
+    }
+
+    #[test]
+    fn ingest_belegt_saturates_instead_of_overflowing() {
+        let mut d = Discovery::new();
+        // base = 0xFFF8; second status byte's bit0 → addr = base + 8 = 0x10000, which
+        // overflows u16. A corrupted/noisy frame can push `base` this high — must
+        // saturate to 0xFFFF instead of panicking (overflow-checks builds) or wrapping.
+        d.ingest_belegt(&belegt(0x71, 0xFF, 0xF8, &[0xFF, 0xFE]));
+        assert!(d.occupied().contains(&0xFFFF));
+    }
+
+    #[test]
+    fn occupied_set_is_capped_at_max_sensors() {
+        let mut d = Discovery::new();
+        // 100 blocks × 8 fully-occupied bits = 800 distinct addresses, well beyond
+        // MAX_SENSORS(600) — a noisy/corrupted serial stream could report this many.
+        for block in 0..100u16 {
+            let base = block * 8;
+            d.ingest_belegt(&belegt(
+                0x71,
+                (base >> 8) as u8,
+                (base & 0xFF) as u8,
+                &[0x00],
+            ));
+        }
+        assert_eq!(d.occupied().len(), MAX_SENSORS);
+        // Building a config from an over-full occupied set must not panic (the
+        // `.expect()` in `into_config`/`into_config_for` assumes this can't happen).
+        let cfg = d.into_config();
+        assert!(cfg.sensors.len() <= MAX_SENSORS);
     }
 }

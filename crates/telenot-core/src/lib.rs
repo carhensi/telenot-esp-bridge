@@ -350,6 +350,15 @@ impl Core {
         let mut had_fehler = false;
         for rec in frame.records().filter_map(|r| r.ok()) {
             if let Some(f) = rec.as_fehler() {
+                // "No detection point here" WITHOUT a command in flight is a normal
+                // discovery text-query response (an address the 0x24 occupancy scan
+                // flagged occupied but that has no physical component) — not a rejected
+                // command. Discovery queries bypass `in_flight`/`pending` entirely (sent
+                // directly via Action::SendFrame from the scan runner), so this can never
+                // suppress the report for a genuine command rejection.
+                if f.fehlercode.is_not_occupied() && self.in_flight.is_none() {
+                    continue;
+                }
                 had_fehler = true;
                 actions.push(command_result(format!("FEHLER {:?}", f.fehlercode)));
                 actions.push(Action::Log(format!(

@@ -316,6 +316,14 @@ function App() {
   const hydrateMqtt = useCallback(() => {
     API.getMqtt().then((m) => setMqtt({ ...m, _pw: "" })).catch(() => {});
   }, []);
+  // Hydrate PIN-set/remote-disarm state — otherwise the Security screen shows "no PIN
+  // set" / "remote disarm off" after a reload even though both are actually configured
+  // (state was previously only ever set locally after a PUT, never refetched).
+  const hydrateSecurity = useCallback(() => {
+    API.getSecurity()
+      .then((s) => setSec((p) => ({ ...p, pinSet: !!s.pin_set, remoteDisarm: !!s.remote_disarm })))
+      .catch(() => {});
+  }, []);
 
   // Backend detection + session resume: /device is public. If a valid session exists (cookie
   // survives reload/new tab) we skip boot + login and land directly in the wizard —
@@ -349,6 +357,7 @@ function App() {
       setMaxStep((m) => Math.max(m, 2));
       hydrateConnection();
       hydrateMqtt();
+      hydrateSecurity();
       try {
         const s = await API.getScan();
         if (s && s.phase && s.phase !== "idle") {
@@ -469,6 +478,7 @@ function App() {
   const enterWizard = useCallback(async () => {
     if (live && API) {
       hydrateConnection();
+      hydrateSecurity();
       try {
         const s = await API.getScan();
         if (s && s.phase && s.phase !== "idle") {
@@ -506,7 +516,7 @@ function App() {
       } catch (_) {}
     }
     next();
-  }, [live, dev, next, attachScanPoll, hydrateConnection, hydrateSensors]);
+  }, [live, dev, next, attachScanPoll, hydrateConnection, hydrateSecurity, hydrateSensors]);
 
   const keepPartial = useCallback(() => { clearInterval(scanTimer.current); if (live && API) API.cancelScan(true).catch(() => {}); setScan((s) => ({ ...s, phase: "done", remaining: 0 })); }, [live]);
   const discardScan = useCallback(() => { clearInterval(scanTimer.current); if (live && API) API.cancelScan(false).catch(() => {}); setScan({ phase: "idle", total: 0, scanned: 0, named: 0, elapsed: 0, remaining: 540, current: 0, feed: [] }); }, [live]);

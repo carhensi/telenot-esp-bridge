@@ -68,6 +68,12 @@ pub struct ApiSensor {
     pub confirmed: bool,
     /// Switch authorization (`OUTPUT_ON/OFF` allowlist) — meaningful only for outputs.
     pub switchable: bool,
+    /// May this address be turned into a switch output for the ACTIVE panel profile?
+    /// Distinct from `switchable`, which is whether it currently IS one. Complex400 and
+    /// Hiplex8400 have different output/status address windows — the frontend must not
+    /// derive this itself from the raw address (single source of truth,
+    /// `telenot_core::profile::PanelProfile::is_switchable_addr`).
+    pub switchable_eligible: bool,
     /// Mirror as a HomeKit accessory (direct HomeKit mode).
     pub show_in_homekit: bool,
     /// Original name from the panel (read-only).

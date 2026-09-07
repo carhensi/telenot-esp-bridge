@@ -499,6 +499,55 @@ fn command_acked_publishes_ok() {
     );
 }
 
+/// Raw frame with a single Fehler record (satztyp 0x11, payload `[geraet, code]`) and the
+/// given FT1.2 control byte (function).
+fn fehler_frame(control: u8, code: u8) -> Frame {
+    let user_data = [control, 0x02, 0x02, satztyp::FEHLER, 0x00, code];
+    let mut out = [0u8; 32];
+    let n = encode_frame(&user_data, &mut out).expect("frame");
+    let mut d = FrameDecoder::new();
+    d.feed(&out[..n]);
+    d.next_frame().unwrap().unwrap()
+}
+
+const FEHLER_NICHT_BELEGT: u8 = 0x19;
+
+#[test]
+fn fehler_not_occupied_without_in_flight_command_is_not_reported() {
+    // A text-query response during discovery (no command ever queued) returning
+    // "not occupied" must NOT be reported as a rejected command — it's a normal,
+    // panel-documented response for an address without a physical component.
+    let mut c = core(false);
+    let a = c.on_frame(0, &fehler_frame(C_SEND_NDAT, FEHLER_NICHT_BELEGT));
+    assert!(
+        published(&a, "command_result").is_none(),
+        "no bogus command_result without an in-flight command"
+    );
+    assert!(
+        !a.iter()
+            .any(|x| matches!(x, Action::Log(m) if m.contains("Zentrale lehnte Befehl ab"))),
+        "no false rejection log"
+    );
+}
+
+#[test]
+fn fehler_not_occupied_with_in_flight_command_is_still_reported() {
+    // The SAME Fehler code, but a real command IS in flight — must still be reported
+    // (no regression: this is a genuine rejection, not a discovery side-effect).
+    let mut c = core(true);
+    c.on_command(0, ArmCommand::Disarm);
+    let a = c.on_frame(0, &decode(OUTSTATUS_INTERN));
+    assert!(
+        has_send(&a, &encoded(0x0530, 0xE1)),
+        "command sent in window"
+    );
+    let a = c.on_frame(100, &fehler_frame(0x00, FEHLER_NICHT_BELEGT));
+    assert!(
+        published(&a, "command_result").is_some_and(|p| p.contains("NichtBelegt")),
+        "genuine in-flight rejection is still reported"
+    );
+}
+
 #[test]
 fn command_retried_on_collision_then_fails_visibly() {
     // If a panel telegram arrives instead of an ACK, our command is considered

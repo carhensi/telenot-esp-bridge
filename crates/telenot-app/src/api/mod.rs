@@ -87,7 +87,12 @@ pub fn check_auth(
     origin_ok: bool,
     mutating: bool,
 ) -> Result<(), ApiResponse> {
-    let authed = app.session.is_some() && session_token == app.session.as_deref();
+    // Constant-time: session/CSRF tokens are secrets, an early-exiting `==` would let an
+    // attacker on the same LAN segment recover them byte-by-byte via response timing.
+    let authed = match (app.session.as_deref(), session_token) {
+        (Some(s), Some(t)) => crate::ct_eq(s.as_bytes(), t.as_bytes()),
+        _ => false,
+    };
     if !authed {
         return Err(err(401, "unauthorized", "Session erforderlich"));
     }
@@ -95,11 +100,48 @@ pub fn check_auth(
         if !origin_ok {
             return Err(err(403, "bad_origin", "Origin abgelehnt"));
         }
-        if csrf_token.is_none() || csrf_token != app.csrf.as_deref() {
+        let csrf_ok = match (app.csrf.as_deref(), csrf_token) {
+            (Some(c), Some(t)) => crate::ct_eq(c.as_bytes(), t.as_bytes()),
+            _ => false,
+        };
+        if !csrf_ok {
             return Err(err(403, "csrf", "CSRF-Token fehlt/ungültig"));
         }
     }
     Ok(())
+}
+
+/// [`check_auth`] plus the first-boot password requirement, with NO route allowlist
+/// (unlike [`dispatch`], which exempts password-change/logout). Used by the OTA streaming
+/// route (firmware `httpd.rs` and the host sim), which never bypasses that requirement —
+/// otherwise the (well-known) initial/default password could flash arbitrary firmware
+/// before it's ever changed.
+pub fn check_auth_and_setup_gate(
+    app: &App,
+    session_token: Option<&str>,
+    csrf_token: Option<&str>,
+    origin_ok: bool,
+    mutating: bool,
+) -> Result<(), ApiResponse> {
+    check_auth(app, session_token, csrf_token, origin_ok, mutating)?;
+    if app.services.password_change_required() {
+        return Err(err(
+            403,
+            "password_change_required",
+            "Erst ein neues Passwort vergeben",
+        ));
+    }
+    Ok(())
+}
+
+/// Does the `Origin` header's authority (`scheme://host[:port]`, no path per the Fetch
+/// spec) exactly match `Host`? Case-insensitive (host names aren't case-sensitive).
+/// Deliberately NOT a substring check: `origin.contains(host)` would accept
+/// `https://192.168.1.50.attacker.example` for `Host: 192.168.1.50`.
+pub fn origin_matches_host(origin: &str, host: &str) -> bool {
+    let authority = origin.split_once("://").map_or(origin, |(_, rest)| rest);
+    let authority = authority.split(['/', '?', '#']).next().unwrap_or(authority);
+    authority.eq_ignore_ascii_case(host)
 }
 
 /// Entry point: routes the request. Public routes first, then the session+CSRF gate.
@@ -259,7 +301,7 @@ pub fn dispatch(app: &mut App, req: &ApiRequest) -> ApiResponse {
         // Live test board: arm/disarm/bypass. PIN gate + execution in the daemon
         // (security-reducing commands are fail-closed).
         (Method::Post, ["command"]) => match parse_body::<CommandReq>(req) {
-            Ok(c) => match crate::command::parse_bridge_command(&c) {
+            Ok(c) => match crate::command::parse_bridge_command(&c, app.persisted.panel.kind) {
                 Ok(cmd) => {
                     app.intents.push(Intent::Command { cmd, pin: c.pin });
                     ApiResponse::empty(202)
@@ -270,5 +312,75 @@ pub fn dispatch(app: &mut App, req: &ApiRequest) -> ApiResponse {
         },
 
         _ => err(404, "not_found", "unbekannte Route"),
+    }
+}
+
+#[cfg(test)]
+mod auth_tests {
+    use super::*;
+    use crate::security::InMemoryServices;
+
+    fn app_with(session: Option<&str>, csrf: Option<&str>) -> App {
+        let mut app = App::new(
+            crate::DeviceInfo::default(),
+            Box::new(InMemoryServices::new("sticker-pw")),
+        );
+        app.session = session.map(String::from);
+        app.csrf = csrf.map(String::from);
+        app
+    }
+
+    #[test]
+    fn origin_matches_host_exact() {
+        assert!(origin_matches_host("http://192.168.1.50", "192.168.1.50"));
+        assert!(origin_matches_host(
+            "https://Device.Local:8080",
+            "device.local:8080"
+        ));
+    }
+
+    #[test]
+    fn origin_matches_host_rejects_subdomain_attack() {
+        // A naive `origin.contains(host)` would wrongly accept this.
+        assert!(!origin_matches_host(
+            "http://192.168.1.50.attacker.example",
+            "192.168.1.50"
+        ));
+        assert!(!origin_matches_host("http://evil.com", "192.168.1.50"));
+    }
+
+    #[test]
+    fn origin_matches_host_rejects_port_mismatch() {
+        assert!(!origin_matches_host(
+            "http://192.168.1.50:81",
+            "192.168.1.50:80"
+        ));
+    }
+
+    #[test]
+    fn check_auth_rejects_wrong_session_and_csrf() {
+        let app = app_with(Some("sess-abc"), Some("csrf-xyz"));
+        assert!(check_auth(&app, Some("wrong"), Some("csrf-xyz"), true, true).is_err());
+        assert!(check_auth(&app, Some("sess-abc"), Some("wrong"), true, true).is_err());
+        assert!(check_auth(&app, Some("sess-abc"), Some("csrf-xyz"), true, true).is_ok());
+    }
+
+    #[test]
+    fn setup_gate_denies_ota_before_password_change() {
+        let app = app_with(Some("sess-abc"), Some("csrf-xyz"));
+        assert!(app.services.password_change_required());
+        let resp = check_auth_and_setup_gate(&app, Some("sess-abc"), Some("csrf-xyz"), true, true)
+            .unwrap_err();
+        assert_eq!(resp.status, 403);
+    }
+
+    #[test]
+    fn setup_gate_allows_after_password_change() {
+        let mut app = app_with(Some("sess-abc"), Some("csrf-xyz"));
+        app.services.set_password("neues-geheim-1").unwrap();
+        assert!(!app.services.password_change_required());
+        assert!(
+            check_auth_and_setup_gate(&app, Some("sess-abc"), Some("csrf-xyz"), true, true).is_ok()
+        );
     }
 }

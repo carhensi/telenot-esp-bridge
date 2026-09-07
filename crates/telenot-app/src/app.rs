@@ -82,8 +82,9 @@ impl EditSession {
     }
 
     /// API view of the sensor at `idx` (panics on out-of-range — callers index via
-    /// `find_idx`/`len`).
-    pub fn api_at(&self, idx: usize) -> ApiSensor {
+    /// `find_idx`/`len`). `panel_kind` is the active edit session's panel — see
+    /// `ApiSensor::switchable_eligible`.
+    pub fn api_at(&self, idx: usize, panel_kind: telenot_config::PanelKind) -> ApiSensor {
         let s = self.table.get(idx).expect("idx within session table");
         let excluded = self.excluded[idx];
         let status = if excluded {
@@ -102,6 +103,8 @@ impl EditSession {
             polarity: s.polarity(),
             confirmed: s.confirmed(),
             switchable: s.switchable(),
+            switchable_eligible: telenot_core::profile::from_config_kind(panel_kind)
+                .is_switchable_addr(s.address()),
             show_in_homekit: s.show_in_homekit(),
             raw_name: self
                 .raw_names
@@ -704,35 +707,42 @@ impl App {
     /// read-only (nothing excluded, no raw names/dup info).
     pub fn sensor_page(&self, offset: usize, limit: usize) -> Vec<ApiSensor> {
         match &self.setup.session {
-            Some(sess) => (offset..(offset + limit).min(sess.len()))
-                .map(|i| sess.api_at(i))
-                .collect(),
-            None => self
-                .persisted
-                .sensors
-                .iter()
-                .skip(offset)
-                .take(limit)
-                .map(|s| ApiSensor {
-                    address: s.address(),
-                    name: s.name().to_string(),
-                    name_ha: s.name_ha().to_string(),
-                    kind: s.kind(),
-                    topic: s.topic().to_string(),
-                    polarity: s.polarity(),
-                    confirmed: s.confirmed(),
-                    switchable: s.switchable(),
-                    show_in_homekit: s.show_in_homekit(),
-                    raw_name: s.name().to_string(),
-                    dup_of: None,
-                    status: if s.confirmed() {
-                        SensorStatus::Confirmed
-                    } else {
-                        SensorStatus::Unconfirmed
-                    },
-                    include: true,
-                })
-                .collect(),
+            Some(sess) => {
+                let panel_kind = self.setup.panel.kind;
+                (offset..(offset + limit).min(sess.len()))
+                    .map(|i| sess.api_at(i, panel_kind))
+                    .collect()
+            }
+            None => {
+                let panel_kind = self.persisted.panel.kind;
+                self.persisted
+                    .sensors
+                    .iter()
+                    .skip(offset)
+                    .take(limit)
+                    .map(|s| ApiSensor {
+                        address: s.address(),
+                        name: s.name().to_string(),
+                        name_ha: s.name_ha().to_string(),
+                        kind: s.kind(),
+                        topic: s.topic().to_string(),
+                        polarity: s.polarity(),
+                        confirmed: s.confirmed(),
+                        switchable: s.switchable(),
+                        switchable_eligible: telenot_core::profile::from_config_kind(panel_kind)
+                            .is_switchable_addr(s.address()),
+                        show_in_homekit: s.show_in_homekit(),
+                        raw_name: s.name().to_string(),
+                        dup_of: None,
+                        status: if s.confirmed() {
+                            SensorStatus::Confirmed
+                        } else {
+                            SensorStatus::Unconfirmed
+                        },
+                        include: true,
+                    })
+                    .collect()
+            }
         }
     }
 

@@ -24,7 +24,9 @@ pub(super) fn handle_put_pin(app: &mut App, req: &ApiRequest) -> ApiResponse {
                 return err(400, "pin_invalid", "PIN numerisch, mindestens 4 Stellen");
             }
             let weak = is_weak_pin(&p.pin);
-            app.services.set_pin(&p.pin);
+            if app.services.set_pin(&p.pin).is_err() {
+                return err(500, "storage_failed", "PIN konnte nicht gespeichert werden");
+            }
             ok_json(
                 200,
                 &PinResp {

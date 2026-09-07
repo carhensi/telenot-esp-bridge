@@ -547,7 +547,9 @@ fn seeded_app(
     // remote disarm; --enable-disarm only activates the master switch (disarm still requires a
     // PIN → stays fail-closed). The actual gate always checks app.setup + services.
     if let Some(p) = pin {
-        app.services.set_pin(p);
+        app.services
+            .set_pin(p)
+            .expect("InMemoryServices::set_pin never fails");
     }
     app.setup.remote_disarm = remote_disarm;
     app
@@ -741,7 +743,12 @@ fn ema_loop(
                     Ok(Event::Incoming(Incoming::Publish(p))) => {
                         if cmd_topic.as_deref() == Some(p.topic.as_str()) {
                             // Eventloop-Thread reicht nur einen Intent ein — NIE direkt in den Core.
-                            match telenot_app::parse_command_message(p.payload.as_ref(), p.retain) {
+                            let panel_kind = app_ev.lock().unwrap().persisted.panel.kind;
+                            match telenot_app::parse_command_message(
+                                p.payload.as_ref(),
+                                p.retain,
+                                panel_kind,
+                            ) {
                                 Ok((cmd, pin)) => {
                                     app_ev
                                         .lock()
@@ -1116,7 +1123,7 @@ fn handle_http(
     }
     let origin_ok = match (&origin, &host) {
         (None, _) => true,
-        (Some(o), Some(h)) => o.contains(h.as_str()),
+        (Some(o), Some(h)) => telenot_app::api::origin_matches_host(o, h),
         (Some(_), None) => false,
     };
 
@@ -1217,9 +1224,13 @@ fn handle_ota_upload_mock(
     // Auth + Zustands-Gate VOR dem Body (wie die Firmware).
     {
         let mut a = app.lock().unwrap();
-        if let Err(resp) =
-            telenot_app::api::check_auth(&a, session.as_deref(), csrf.as_deref(), origin_ok, true)
-        {
+        if let Err(resp) = telenot_app::api::check_auth_and_setup_gate(
+            &a,
+            session.as_deref(),
+            csrf.as_deref(),
+            origin_ok,
+            true,
+        ) {
             let mut r = tiny_http::Response::from_data(resp.body).with_status_code(resp.status);
             r.add_header(header("Content-Type", resp.content_type));
             let _ = request.respond(r);

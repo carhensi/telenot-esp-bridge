@@ -674,7 +674,7 @@ function SensorDrawer({ s, t, kl, sensors, onClose, onPatch, onConfirm }) {
           <input type="checkbox" checked={s.include} onChange={(e) => onPatch({ include: e.target.checked, status: e.target.checked ? (s.confirmed ? "confirmed" : "unconfirmed") : "excluded" })} />
           <span className="toggle__track"><span className="toggle__thumb" /></span>
         </label>
-        {s.address >= 0x0500 && (
+        {s.switchable_eligible && (
           <div className="stack stack-2">
             <label className="toggle" style={{ justifyContent: "space-between", width: "100%" }}>
               <span>{t("dr.switchable")}</span>

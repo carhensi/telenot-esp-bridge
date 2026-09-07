@@ -69,6 +69,12 @@ pub(super) fn handle_set_password(app: &mut App, req: &ApiRequest) -> ApiRespons
             return err(403, "current_password_invalid", "Aktuelles Passwort falsch");
         }
     }
-    app.services.set_password(&body.new_password);
+    if app.services.set_password(&body.new_password).is_err() {
+        return err(
+            500,
+            "storage_failed",
+            "Passwort konnte nicht gespeichert werden",
+        );
+    }
     ApiResponse::empty(204)
 }

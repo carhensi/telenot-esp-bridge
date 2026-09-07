@@ -41,6 +41,8 @@ fn feed_from(
             polarity: s.polarity(),
             confirmed: s.confirmed(),
             switchable: s.switchable(),
+            switchable_eligible: telenot_core::profile::from_config_kind(cfg.panel.kind)
+                .is_switchable_addr(s.address()),
             show_in_homekit: s.show_in_homekit(),
             raw_name: raw
                 .get(&s.address())
@@ -276,6 +278,10 @@ pub(super) fn handle_patch(app: &mut App, req: &ApiRequest, addr: u16) -> ApiRes
         Ok(v) => v,
         Err(e) => return e,
     };
+    // Read before `app.edit()` (which mutably borrows all of `app`) — the active edit
+    // session's panel selection, not the persisted/committed one (PATCH edits the
+    // in-progress setup state).
+    let panel_kind = app.setup.panel.kind;
     let sess = app.edit();
     let Some(idx) = sess.find_idx(addr) else {
         return err(404, "not_found", "Sensor nicht gefunden");
@@ -317,7 +323,9 @@ pub(super) fn handle_patch(app: &mut App, req: &ApiRequest, addr: u16) -> ApiRes
         if let Some(v) = p.switchable {
             // Fail-closed: only allow switching for real switch outputs — inputs and the
             // system-status block (arm/bypass addresses) always remain false.
-            m.set_switchable(v && telenot_config::is_switchable_addr(addr));
+            m.set_switchable(
+                v && telenot_core::profile::from_config_kind(panel_kind).is_switchable_addr(addr),
+            );
         }
         if let Some(v) = p.show_in_homekit {
             m.set_show_in_homekit(v);
@@ -326,7 +334,7 @@ pub(super) fn handle_patch(app: &mut App, req: &ApiRequest, addr: u16) -> ApiRes
     if let Some(inc) = p.include {
         sess.excluded[idx] = !inc;
     }
-    let api = sess.api_at(idx);
+    let api = sess.api_at(idx, panel_kind);
     ok_json(200, &api)
 }
 

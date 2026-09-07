@@ -135,7 +135,12 @@ pub fn parse_arm_command(s: &str) -> Option<ArmCommand> {
 }
 
 /// `CommandReq` → `BridgeCommand` (shared by REST and MQTT). Bypass requires `mb`.
-pub fn parse_bridge_command(req: &CommandReq) -> Result<BridgeCommand, &'static str> {
+/// `panel_kind` selects the address-topology profile for the switchable-output gate below —
+/// Complex400 and Hiplex8400 have different output/status ranges (see `telenot_core::profile`).
+pub fn parse_bridge_command(
+    req: &CommandReq,
+    panel_kind: telenot_config::PanelKind,
+) -> Result<BridgeCommand, &'static str> {
     let s = req.cmd.trim().to_ascii_lowercase();
     if let Some(arm) = parse_arm_command(&s) {
         return match req.area {
@@ -153,8 +158,11 @@ pub fn parse_bridge_command(req: &CommandReq) -> Result<BridgeCommand, &'static 
     } {
         return match req.addr {
             // Only real switch outputs (excluding the system-status block — arm/bypass
-            // addresses are off-limits for the non-PIN-gated output path).
-            Some(addr) if telenot_config::is_switchable_addr(addr) => {
+            // addresses are off-limits for the non-PIN-gated output path). Profile-aware:
+            // the switchable window differs between Complex400 and Hiplex8400.
+            Some(addr)
+                if telenot_core::profile::from_config_kind(panel_kind).is_switchable_addr(addr) =>
+            {
                 Ok(BridgeCommand::Output { addr, on })
             }
             Some(_) => Err("addr ist kein schaltbarer Ausgang"),
@@ -180,12 +188,13 @@ pub fn parse_bridge_command(req: &CommandReq) -> Result<BridgeCommand, &'static 
 pub fn parse_command_message(
     payload: &[u8],
     retained: bool,
+    panel_kind: telenot_config::PanelKind,
 ) -> Result<(BridgeCommand, Option<String>), &'static str> {
     if retained {
         return Err("retained command verworfen");
     }
     let req: CommandReq = serde_json::from_slice(payload).map_err(|_| "ungültiges JSON")?;
-    let cmd = parse_bridge_command(&req)?;
+    let cmd = parse_bridge_command(&req, panel_kind)?;
     Ok((cmd, req.pin))
 }
 
@@ -204,26 +213,49 @@ mod tests {
 
     #[test]
     fn message_parsing_and_retained_discard() {
-        let (cmd, pin) = parse_command_message(br#"{"cmd":"ARM_AWAY"}"#, false).unwrap();
+        let (cmd, pin) = parse_command_message(
+            br#"{"cmd":"ARM_AWAY"}"#,
+            false,
+            telenot_config::PanelKind::Complex400,
+        )
+        .unwrap();
         assert_eq!(cmd, BridgeCommand::Arm(ArmCommand::ArmAway));
         assert_eq!(pin, None);
 
-        let (cmd, pin) = parse_command_message(br#"{"cmd":"disarm","pin":"4729"}"#, false).unwrap();
+        let (cmd, pin) = parse_command_message(
+            br#"{"cmd":"disarm","pin":"4729"}"#,
+            false,
+            telenot_config::PanelKind::Complex400,
+        )
+        .unwrap();
         assert_eq!(cmd, BridgeCommand::Arm(ArmCommand::Disarm));
         assert_eq!(pin.as_deref(), Some("4729"));
 
         // retained → discarded
-        assert!(parse_command_message(br#"{"cmd":"DISARM"}"#, true).is_err());
+        assert!(parse_command_message(
+            br#"{"cmd":"DISARM"}"#,
+            true,
+            telenot_config::PanelKind::Complex400
+        )
+        .is_err());
         // garbage / unknown
-        assert!(parse_command_message(b"not json", false).is_err());
-        assert!(parse_command_message(br#"{"cmd":"nope"}"#, false).is_err());
+        assert!(
+            parse_command_message(b"not json", false, telenot_config::PanelKind::Complex400)
+                .is_err()
+        );
+        assert!(parse_command_message(
+            br#"{"cmd":"nope"}"#,
+            false,
+            telenot_config::PanelKind::Complex400
+        )
+        .is_err());
     }
 
     use crate::security::InMemoryServices;
 
     fn svc_with_pin(pin: &str) -> InMemoryServices {
         let mut s = InMemoryServices::new("pw");
-        s.set_pin(pin);
+        s.set_pin(pin).unwrap();
         s
     }
 
@@ -272,8 +304,12 @@ mod tests {
 
     #[test]
     fn bypass_parsing_validates_mb() {
-        let (cmd, _) =
-            parse_command_message(br#"{"cmd":"BYPASS_ON","mb":3,"pin":"1"}"#, false).unwrap();
+        let (cmd, _) = parse_command_message(
+            br#"{"cmd":"BYPASS_ON","mb":3,"pin":"1"}"#,
+            false,
+            telenot_config::PanelKind::Complex400,
+        )
+        .unwrap();
         assert_eq!(
             cmd,
             BridgeCommand::Bypass {
@@ -281,7 +317,12 @@ mod tests {
                 sperren: true
             }
         );
-        let (cmd, _) = parse_command_message(br#"{"cmd":"bypass_off","mb":128}"#, false).unwrap();
+        let (cmd, _) = parse_command_message(
+            br#"{"cmd":"bypass_off","mb":128}"#,
+            false,
+            telenot_config::PanelKind::Complex400,
+        )
+        .unwrap();
         assert_eq!(
             cmd,
             BridgeCommand::Bypass {
@@ -289,20 +330,50 @@ mod tests {
                 sperren: false
             }
         );
-        assert!(parse_command_message(br#"{"cmd":"BYPASS_ON"}"#, false).is_err());
-        assert!(parse_command_message(br#"{"cmd":"BYPASS_ON","mb":0}"#, false).is_err());
+        assert!(parse_command_message(
+            br#"{"cmd":"BYPASS_ON"}"#,
+            false,
+            telenot_config::PanelKind::Complex400
+        )
+        .is_err());
+        assert!(parse_command_message(
+            br#"{"cmd":"BYPASS_ON","mb":0}"#,
+            false,
+            telenot_config::PanelKind::Complex400
+        )
+        .is_err());
         // Parser ceiling = hiplex maximum (512); the exact per-panel limit (complex: 128)
         // is enforced by the core against the active profile.
-        assert!(parse_command_message(br#"{"cmd":"BYPASS_ON","mb":512}"#, false).is_ok());
-        assert!(parse_command_message(br#"{"cmd":"BYPASS_ON","mb":513}"#, false).is_err());
+        assert!(parse_command_message(
+            br#"{"cmd":"BYPASS_ON","mb":512}"#,
+            false,
+            telenot_config::PanelKind::Complex400
+        )
+        .is_ok());
+        assert!(parse_command_message(
+            br#"{"cmd":"BYPASS_ON","mb":513}"#,
+            false,
+            telenot_config::PanelKind::Complex400
+        )
+        .is_err());
     }
 
     #[test]
     fn arm_area_parsing() {
         // area absent or 1 → legacy Arm; 2..=16 → ArmArea; beyond → error.
-        let (cmd, _) = parse_command_message(br#"{"cmd":"ARM_AWAY","area":1}"#, false).unwrap();
+        let (cmd, _) = parse_command_message(
+            br#"{"cmd":"ARM_AWAY","area":1}"#,
+            false,
+            telenot_config::PanelKind::Complex400,
+        )
+        .unwrap();
         assert_eq!(cmd, BridgeCommand::Arm(ArmCommand::ArmAway));
-        let (cmd, _) = parse_command_message(br#"{"cmd":"ARM_HOME","area":3}"#, false).unwrap();
+        let (cmd, _) = parse_command_message(
+            br#"{"cmd":"ARM_HOME","area":3}"#,
+            false,
+            telenot_config::PanelKind::Complex400,
+        )
+        .unwrap();
         assert_eq!(
             cmd,
             BridgeCommand::ArmArea {
@@ -310,16 +381,30 @@ mod tests {
                 area: 3
             }
         );
-        assert!(parse_command_message(br#"{"cmd":"ARM_HOME","area":17}"#, false).is_err());
+        assert!(parse_command_message(
+            br#"{"cmd":"ARM_HOME","area":17}"#,
+            false,
+            telenot_config::PanelKind::Complex400
+        )
+        .is_err());
         // Area-targeted disarm stays security-reducing (PIN + opt-in path).
-        let (cmd, _) =
-            parse_command_message(br#"{"cmd":"disarm","area":2,"pin":"1"}"#, false).unwrap();
+        let (cmd, _) = parse_command_message(
+            br#"{"cmd":"disarm","area":2,"pin":"1"}"#,
+            false,
+            telenot_config::PanelKind::Complex400,
+        )
+        .unwrap();
         assert!(cmd.is_security_reducing());
     }
 
     #[test]
     fn output_parsing_validates_addr() {
-        let (cmd, _) = parse_command_message(br#"{"cmd":"OUTPUT_ON","addr":1301}"#, false).unwrap();
+        let (cmd, _) = parse_command_message(
+            br#"{"cmd":"OUTPUT_ON","addr":1301}"#,
+            false,
+            telenot_config::PanelKind::Complex400,
+        )
+        .unwrap();
         assert_eq!(
             cmd,
             BridgeCommand::Output {
@@ -327,8 +412,12 @@ mod tests {
                 on: true
             }
         );
-        let (cmd, _) =
-            parse_command_message(br#"{"cmd":"output_off","addr":1301}"#, false).unwrap();
+        let (cmd, _) = parse_command_message(
+            br#"{"cmd":"output_off","addr":1301}"#,
+            false,
+            telenot_config::PanelKind::Complex400,
+        )
+        .unwrap();
         assert_eq!(
             cmd,
             BridgeCommand::Output {
@@ -337,13 +426,58 @@ mod tests {
             }
         );
         // Missing addr / outside switch-output address space → error.
-        assert!(parse_command_message(br#"{"cmd":"OUTPUT_ON"}"#, false).is_err());
-        assert!(parse_command_message(br#"{"cmd":"OUTPUT_ON","addr":117}"#, false).is_err());
-        assert!(parse_command_message(br#"{"cmd":"OUTPUT_ON","addr":1920}"#, false).is_err());
+        assert!(parse_command_message(
+            br#"{"cmd":"OUTPUT_ON"}"#,
+            false,
+            telenot_config::PanelKind::Complex400
+        )
+        .is_err());
+        assert!(parse_command_message(
+            br#"{"cmd":"OUTPUT_ON","addr":117}"#,
+            false,
+            telenot_config::PanelKind::Complex400
+        )
+        .is_err());
+        assert!(parse_command_message(
+            br#"{"cmd":"OUTPUT_ON","addr":1920}"#,
+            false,
+            telenot_config::PanelKind::Complex400
+        )
+        .is_err());
         // System-status block (arm/bypass addresses) is off-limits for output:
         // 0x0530 = disarm B1 (1328), 0x05F2 = MB3 bypassed (1522).
-        assert!(parse_command_message(br#"{"cmd":"OUTPUT_ON","addr":1328}"#, false).is_err());
-        assert!(parse_command_message(br#"{"cmd":"OUTPUT_OFF","addr":1522}"#, false).is_err());
+        assert!(parse_command_message(
+            br#"{"cmd":"OUTPUT_ON","addr":1328}"#,
+            false,
+            telenot_config::PanelKind::Complex400
+        )
+        .is_err());
+        assert!(parse_command_message(
+            br#"{"cmd":"OUTPUT_OFF","addr":1522}"#,
+            false,
+            telenot_config::PanelKind::Complex400
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn output_parsing_is_profile_aware() {
+        // 0x0700 (1792): inside Complex400's output range (0x0500..0x0780, and outside its
+        // narrower status block) — switchable. Hiplex8400's output range is only
+        // 0x0500..0x0530 — 0x0700 must be rejected there. Regression for the bug where this
+        // gate used the panel-agnostic (Complex400-shaped) check regardless of `panel_kind`.
+        assert!(parse_command_message(
+            br#"{"cmd":"OUTPUT_ON","addr":1792}"#,
+            false,
+            telenot_config::PanelKind::Complex400
+        )
+        .is_ok());
+        assert!(parse_command_message(
+            br#"{"cmd":"OUTPUT_ON","addr":1792}"#,
+            false,
+            telenot_config::PanelKind::Hiplex8400
+        )
+        .is_err());
     }
 
     #[test]

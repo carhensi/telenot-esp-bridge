@@ -94,6 +94,7 @@ export const API = { live: false, csrf: null };
     getMqttTest: () => req("GET", "/mqtt/test"),
     pinCert: () => req("POST", "/mqtt/pin"),
     unpinCert: () => req("DELETE", "/mqtt/pin"),
+    getSecurity: () => req("GET", "/security"),
     putPin: (pin) => req("PUT", "/security/pin", { pin }),
     putRemoteDisarm: (enabled, acknowledged) =>
       req("PUT", "/security/remote-disarm", { enabled, acknowledged: !!acknowledged }),

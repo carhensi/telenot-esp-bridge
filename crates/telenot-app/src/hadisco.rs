@@ -335,7 +335,9 @@ pub fn discovery_for_each(config: &Config, o: &DiscoveryOpts, emit: &mut dyn FnM
                 && s.switchable()
                 // Hand-edited configs could set switchable on invalid addresses
                 // (validation error) — avoid building a dead or dangerous switch entity.
-                && telenot_config::is_switchable_addr(s.address())
+                // Profile-aware: Complex400 and Hiplex8400 have different output ranges.
+                && telenot_core::profile::from_config_kind(config.panel.kind)
+                    .is_switchable_addr(s.address())
         }) {
             let oid = format!("{}_{:04x}_switch", HA_ID, s.address());
             let name = if s.name_ha().trim().is_empty() {

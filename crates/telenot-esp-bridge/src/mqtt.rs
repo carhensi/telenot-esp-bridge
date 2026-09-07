@@ -177,7 +177,9 @@ impl EspMqttSink {
                             if let Some(area) = area {
                                 // The ESP wrapper does not expose the retain flag → treat as a live
                                 // command; disarm stays fail-closed via PIN + remote disarm.
-                                match telenot_app::parse_command_message(data, false) {
+                                let panel_kind = app.lock().unwrap().persisted.panel.kind;
+                                match telenot_app::parse_command_message(data, false, panel_kind)
+                                {
                                     Ok((cmd, pin)) => {
                                         // Route arm commands from an area topic to that area;
                                         // bypass/output are area-agnostic and pass unchanged.

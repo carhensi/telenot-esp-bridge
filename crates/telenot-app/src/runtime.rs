@@ -539,6 +539,17 @@ impl Runtime {
             got_response = true;
         }
 
+        // "No detection point here" — a valid, panel-documented response for an address
+        // the 0x24 occupancy scan flagged occupied but that has no physical component.
+        // Counts as a response so the scan advances immediately instead of waiting out
+        // the full SCAN_RETRY_MS timeout on that address.
+        if frame.records().filter_map(|r| r.ok()).any(|r| {
+            r.as_fehler()
+                .is_some_and(|f| f.fehlercode.is_not_occupied())
+        }) {
+            got_response = true;
+        }
+
         // Once both occupied telegrams are in: queue text queries.
         if self.discovery.belegt_complete() && !self.text_queued {
             self.text_queued = true;
@@ -628,6 +639,31 @@ mod tests {
             }),
             false,
         )
+    }
+
+    /// Raw frame with a single Fehler record (satztyp 0x11, payload `[geraet, code]`).
+    fn fehler_frame(code: u8) -> Frame {
+        use telenot_protocol::{encode_frame, satztyp};
+        let user_data = [0x73u8, 0x02, 0x02, satztyp::FEHLER, 0x00, code];
+        let mut out = [0u8; 32];
+        let n = encode_frame(&user_data, &mut out).expect("frame");
+        let mut d = FrameDecoder::new();
+        d.feed(&out[..n]);
+        d.next_frame().unwrap().unwrap()
+    }
+
+    #[test]
+    fn ingest_discover_advances_past_not_occupied_response() {
+        // A "not occupied" text-query response must count as a response — otherwise the
+        // scan waits out the full SCAN_RETRY_MS on an address that already answered.
+        let mut r = rt();
+        r.scanning = true;
+        r.awaiting_since_ms = Some(0);
+        r.ingest_discover(&fehler_frame(0x19 /* NichtBelegt */), &mut Vec::new());
+        assert!(
+            r.awaiting_since_ms.is_none(),
+            "not-occupied response clears the await, scan advances immediately"
+        );
     }
 
     #[test]

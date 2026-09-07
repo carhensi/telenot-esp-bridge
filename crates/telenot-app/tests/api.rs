@@ -701,6 +701,64 @@ fn switchable_allowlist_is_fail_closed() {
 }
 
 #[test]
+fn switchable_eligible_reflects_panel_aware_range() {
+    // `switchable_eligible` (candidate eligibility, distinct from `switchable` itself) must
+    // match the same profile-aware gate the PATCH handler enforces — the frontend's sensor
+    // drawer relies on this field instead of duplicating the address-range logic.
+    let mut app = app();
+    let (token, csrf) = login(&mut app);
+    let s = |address| Sensor {
+        address,
+        name: "S".into(),
+        name_ha: "S".into(),
+        kind: SensorKind::Signalgeber,
+        topic: format!("s_{address}"),
+        polarity: Polarity::ActiveLow,
+        confirmed: true,
+        switchable: false,
+        show_in_homekit: false,
+    };
+    app.setup.seed(
+        Config {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            sensors: telenot_config::SensorTable::from_sensors(&[s(0x0515), s(0x0530)]).unwrap(),
+            panel: Default::default(), // Complex400
+        },
+        BTreeMap::new(),
+    );
+
+    let r = dispatch(
+        &mut app,
+        &req(
+            Method::Get,
+            "/api/v1/sensors",
+            Value::Null,
+            Some(&token),
+            Some(&csrf),
+        ),
+    );
+    assert_eq!(r.status, 200);
+    let sensors = jval(&r)["sensors"].clone();
+    let find = |addr: u16| {
+        sensors
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["address"] == addr)
+    };
+    assert_eq!(
+        find(0x0515).unwrap()["switchable_eligible"],
+        true,
+        "Schaltausgang: eligible"
+    );
+    assert_eq!(
+        find(0x0530).unwrap()["switchable_eligible"],
+        false,
+        "Status-Block: nie eligible"
+    );
+}
+
+#[test]
 fn pin_format_is_validated() {
     let mut app = app();
     let (token, csrf) = login(&mut app);

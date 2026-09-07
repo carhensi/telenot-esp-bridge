@@ -13,7 +13,7 @@ use esp_idf_svc::http::server::{Configuration, EspHttpConnection, EspHttpServer,
 use esp_idf_svc::http::Method as EspMethod;
 use esp_idf_svc::io::{EspIOError, Write};
 use esp_idf_svc::sys::EspError;
-use telenot_app::api::{check_auth, dispatch};
+use telenot_app::api::{check_auth_and_setup_gate, dispatch, origin_matches_host};
 use telenot_app::ota::{len_ok, OtaState};
 use telenot_app::{ApiRequest, App, Method, OtaPhase};
 
@@ -97,7 +97,7 @@ fn serve(
     let host = req.header("Host").map(str::to_string);
     let origin_ok = match (&origin, &host) {
         (None, _) => true,
-        (Some(o), Some(h)) => o.contains(h.as_str()),
+        (Some(o), Some(h)) => origin_matches_host(o, h),
         (Some(_), None) => false,
     };
 
@@ -156,7 +156,7 @@ fn serve_ota_upload(
     let host = req.header("Host").map(str::to_string);
     let origin_ok = match (&origin, &host) {
         (None, _) => true,
-        (Some(o), Some(h)) => o.contains(h.as_str()),
+        (Some(o), Some(h)) => origin_matches_host(o, h),
         (Some(_), None) => false,
     };
     let total: Option<usize> = req
@@ -167,7 +167,9 @@ fn serve_ota_upload(
     // Auth and state gate under a short lock — rejected BEFORE any bytes flow.
     {
         let mut a = app.lock().unwrap();
-        if let Err(resp) = check_auth(&a, session.as_deref(), csrf.as_deref(), origin_ok, true) {
+        if let Err(resp) =
+            check_auth_and_setup_gate(&a, session.as_deref(), csrf.as_deref(), origin_ok, true)
+        {
             return write_api_response(req, resp);
         }
         if a.ota.phase == OtaPhase::Receiving {

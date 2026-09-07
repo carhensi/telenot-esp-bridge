@@ -211,11 +211,15 @@ impl Services for NvsServices {
         }
     }
 
-    fn set_password(&mut self, new: &str) {
-        if let Ok(h) = hash_secret(new) {
-            let _ = self.nvs.set_str(K_PW_HASH, &h);
-            let _ = self.nvs.set_u32(K_PW_CHANGED, 1);
-        }
+    fn set_password(&mut self, new: &str) -> Result<(), String> {
+        let h = hash_secret(new)?;
+        self.nvs
+            .set_str(K_PW_HASH, &h)
+            .map_err(|e| e.to_string())?;
+        self.nvs
+            .set_u32(K_PW_CHANGED, 1)
+            .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     fn password_change_required(&self) -> bool {
@@ -235,14 +239,13 @@ impl Services for NvsServices {
         self.login_lock.reset(&self.nvs);
     }
 
-    fn set_pin(&mut self, pin: &str) {
-        match hash_secret(pin) {
-            Ok(h) => {
-                let _ = self.nvs.set_str(K_PIN_HASH, &h);
-                self.pin_lock.reset(&self.nvs);
-            }
-            Err(e) => log::error!("Argon2-Hash (PIN) fehlgeschlagen: {e}"),
-        }
+    fn set_pin(&mut self, pin: &str) -> Result<(), String> {
+        let h = hash_secret(pin)?;
+        self.nvs
+            .set_str(K_PIN_HASH, &h)
+            .map_err(|e| e.to_string())?;
+        self.pin_lock.reset(&self.nvs);
+        Ok(())
     }
 
     fn pin_set(&self) -> bool {

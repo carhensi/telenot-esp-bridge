@@ -28,8 +28,9 @@ pub trait Services: Send {
     /// Pure comparison without lockout — callers wrap this with [`Self::login_locked`]/
     /// [`Self::note_login_fail`]/[`Self::note_login_ok`].
     fn verify_login(&self, password: &str) -> bool;
-    /// Set a new login password (fulfils the first-boot requirement).
-    fn set_password(&mut self, new: &str);
+    /// Set a new login password (fulfils the first-boot requirement). `Err` on a storage
+    /// failure (e.g. NVS write) — callers must surface this rather than reporting success.
+    fn set_password(&mut self, new: &str) -> Result<(), String>;
     /// Is a custom password still required to be set on first start?
     fn password_change_required(&self) -> bool;
 
@@ -40,8 +41,9 @@ pub trait Services: Send {
     /// Successful login → reset the counter/lockout.
     fn note_login_ok(&mut self);
 
-    /// Set the disarm PIN (stored hashed; never readable back).
-    fn set_pin(&mut self, pin: &str);
+    /// Set the disarm PIN (stored hashed; never readable back). `Err` on a storage failure
+    /// (e.g. NVS write) — callers must surface this rather than reporting success.
+    fn set_pin(&mut self, pin: &str) -> Result<(), String>;
     fn pin_set(&self) -> bool;
     /// Verify the disarm PIN **in constant time** against the stored value and maintain a
     /// separate lockout counter. This is the single PIN check — the disarm gate calls ONLY
@@ -180,9 +182,10 @@ impl Services for InMemoryServices {
     fn verify_login(&self, password: &str) -> bool {
         !password.is_empty() && ct_eq(password.as_bytes(), self.login_password.as_bytes())
     }
-    fn set_password(&mut self, new: &str) {
+    fn set_password(&mut self, new: &str) -> Result<(), String> {
         self.login_password = new.to_string();
         self.password_changed = true;
+        Ok(())
     }
     fn password_change_required(&self) -> bool {
         !self.password_changed
@@ -198,9 +201,10 @@ impl Services for InMemoryServices {
     fn note_login_ok(&mut self) {
         self.login_lock.reset();
     }
-    fn set_pin(&mut self, pin: &str) {
+    fn set_pin(&mut self, pin: &str) -> Result<(), String> {
         self.pin = Some(pin.to_string());
         self.pin_lock.reset();
+        Ok(())
     }
     fn pin_set(&self) -> bool {
         self.pin.is_some()
@@ -284,11 +288,11 @@ mod tests {
         assert!(s.password_change_required());
         assert!(s.verify_login("sticker-pw"));
         assert!(!s.verify_login("falsch"));
-        s.set_password("neues-geheim");
+        s.set_password("neues-geheim").unwrap();
         assert!(!s.password_change_required());
         assert!(s.verify_login("neues-geheim"));
         assert!(!s.pin_set());
-        s.set_pin("4729");
+        s.set_pin("4729").unwrap();
         assert!(s.pin_set());
     }
 
@@ -300,7 +304,7 @@ mod tests {
             PinCheck::NoPin,
             "without a set PIN: NoPin"
         );
-        s.set_pin("4729");
+        s.set_pin("4729").unwrap();
         assert_eq!(s.verify_pin("0000"), PinCheck::Wrong);
         assert_eq!(s.verify_pin("4729"), PinCheck::Ok);
     }
@@ -308,7 +312,7 @@ mod tests {
     #[test]
     fn pin_lockout_after_repeated_wrong() {
         let mut s = InMemoryServices::new("pw");
-        s.set_pin("4729");
+        s.set_pin("4729").unwrap();
         for _ in 0..PIN_MAX_FAILS {
             assert_eq!(s.verify_pin("0000"), PinCheck::Wrong);
         }
@@ -324,7 +328,7 @@ mod tests {
     #[test]
     fn correct_pin_resets_fail_counter() {
         let mut s = InMemoryServices::new("pw");
-        s.set_pin("4729");
+        s.set_pin("4729").unwrap();
         // Just below the threshold, then correct → counter reset, no lockout.
         for _ in 0..(PIN_MAX_FAILS - 1) {
             assert_eq!(s.verify_pin("0000"), PinCheck::Wrong);
