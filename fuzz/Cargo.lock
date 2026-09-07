@@ -293,6 +293,7 @@ dependencies = [
  "libfuzzer-sys",
  "serde_json",
  "telenot-app",
+ "telenot-config",
  "telenot-protocol",
 ]
 

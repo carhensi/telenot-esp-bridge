@@ -23,9 +23,15 @@ fuzz_target!(|data: &[u8]| {
     let _ = serde_json::from_slice::<ScanCancelReq>(data);
 
     // Shared command path (REST + MQTT): JSON → BridgeCommand + PIN requirement.
-    let _ = telenot_app::parse_command_message(data, false);
-    let _ = telenot_app::parse_command_message(data, true);
-    if let Ok(req) = serde_json::from_slice::<CommandReq>(data) {
-        let _ = telenot_app::parse_bridge_command(&req);
+    // Both panel kinds: the switchable-output gate differs (Complex400 vs Hiplex8400).
+    for kind in [
+        telenot_config::PanelKind::Complex400,
+        telenot_config::PanelKind::Hiplex8400,
+    ] {
+        let _ = telenot_app::parse_command_message(data, false, kind);
+        let _ = telenot_app::parse_command_message(data, true, kind);
+        if let Ok(req) = serde_json::from_slice::<CommandReq>(data) {
+            let _ = telenot_app::parse_bridge_command(&req, kind);
+        }
     }
 });

@@ -15,6 +15,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 serde_json = "1"
 telenot-protocol = { path = "../crates/telenot-protocol" }
+telenot-config = { path = "../crates/telenot-config" }
 telenot-app = { path = "../crates/telenot-app" }
 
 [[bin]]
