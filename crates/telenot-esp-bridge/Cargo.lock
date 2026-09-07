@@ -1488,7 +1488,7 @@ dependencies = [
 
 [[package]]
 name = "telenot-esp-bridge"
-version = "2026.9.0"
+version = "2026.9.1"
 dependencies = [
  "base64",
  "embuild",

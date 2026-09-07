@@ -8,7 +8,7 @@ name = "telenot-esp-bridge"
 # CalVer (HA-Stil): JAHR.MONAT.PATCH — nur Punkte, streng aufsteigend (der Update-
 # Check vergleicht numerisch; Bindestriche würden als Suffix abgeschnitten).
 # Muss mit dem Release-Tag übereinstimmen (vJAHR.MONAT.PATCH) — CI prüft das.
-version = "2026.9.0"
+version = "2026.9.1"
 description = "esp-idf I/O-Schale für die Telenot-Bridge (Phase B) — Transport/Server/Secrets auf ESP32-POE-ISO."
 edition = "2021"
 license = "Apache-2.0"
