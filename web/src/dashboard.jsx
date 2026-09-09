@@ -175,12 +175,14 @@ function ScreenDashboard({ ctx }) {
   const arm = state ? state.arm_state : "unknown";
   const sstates = state ? state.sensor_states : [];
   const open = sstates.filter((x) => x.active);
+  const known = new Set(sstates.map(x => x.address));
+  const missing = Object.values(smap).filter(s => !known.has(s.address)).length;
   // Controls only when the panel is connected (availability=online) — otherwise commands are
   // discarded anyway ("serial offline"). Readiness comes from the panel bits; if a bit is
-  // still unknown on a connected panel, arm-away falls back to "no sensor open", arm-home stays allowed.
+  // unknown readiness must not be presented as confirmed readiness.
   const connected = !!(state && state.availability === "online");
-  const externReady = connected && (state.extern_ready != null ? state.extern_ready : open.length === 0);
-  const internReady = connected && (state.intern_ready != null ? state.intern_ready : true);
+  const externReady = connected && (state.extern_ready === true);
+  const internReady = connected && (state.intern_ready === true);
   // No connection → no active segment highlighted, all grey.
   const armUi = connected ? arm : "unknown";
   // Best-effort alarm meta: first open sensor (name + address) — no timestamp in the DTO.
@@ -190,6 +192,9 @@ function ScreenDashboard({ ctx }) {
     <div className="page page--mid">
       <PageHead ctx={ctx} eyebrow={op ? L.eyebrow_op : L.eyebrow} title={op ? L.title_op : L.title} sub={op ? L.sub_op : L.sub} />
 
+      <Callout tone={arm === "unknown" ? "warn" : "info"}>
+        {L.arm}: <strong>{arm === "unknown" ? (ctx.lang === "de" ? "Unbekannt" : "Unknown") : L.st[arm] || arm}</strong>
+      </Callout>
       {arm === "TRIGGERED" && (
         <AlarmHero L={L} meta={meta0} onDisarm={() => ctx.openDisarm()} onAck={() => ctx.command("reset")} />
       )}
@@ -208,7 +213,7 @@ function ScreenDashboard({ ctx }) {
         {!connected ? (
           <div className="senschips"><span className="senschip senschip--muted"><span className="senschip__dot" />{L.nodata}</span></div>
         ) : open.length === 0 ? (
-          <div className="senschips"><span className="senschip senschip--ok"><span className="senschip__dot" />{L.allclosed}</span></div>
+          <div className="senschips"><span className="senschip senschip--ok"><span className="senschip__dot" />{missing || !sstates.length ? L.nodata : L.allclosed}</span></div>
         ) : !expanded ? (
           <div className="senschips">
             {open.slice(0, 3).map((x) => {
@@ -245,9 +250,9 @@ function ScreenDashboard({ ctx }) {
           everything is disabled (commands would be discarded); otherwise panel bits gate away/home. */}
       {!connected && <Callout tone="warn" icon="alert">{L.offline}</Callout>}
       <div className="armsw" style={{ marginTop: connected ? undefined : "var(--space-3)" }}>
-        <ArmSeg on={armUi === "ARMED_AWAY"} ready={externReady} notReadyLabel={connected ? L.notready : L.notconn}
+        <ArmSeg on={armUi === "ARMED_AWAY"} ready={externReady} notReadyLabel={connected ? (state.extern_ready == null ? L.nodata : L.notready) : L.notconn}
           tone="armed" icon="shield" title={L.away} desc={L.seg_ext_d} onClick={() => ctx.command("arm_away")} />
-        <ArmSeg on={armUi === "ARMED_HOME"} ready={internReady} notReadyLabel={connected ? L.notready : L.notconn}
+        <ArmSeg on={armUi === "ARMED_HOME"} ready={internReady} notReadyLabel={connected ? (state.intern_ready == null ? L.nodata : L.notready) : L.notconn}
           tone="warn" icon="home" title={L.home} desc={L.seg_int_d} onClick={() => ctx.command("arm_home")} />
         <ArmSeg on={armUi === "DISARMED"} ready={connected} notReadyLabel={L.notconn}
           tone="disarmed" icon="unlock" title={L.disarm} desc={L.seg_off_d} onClick={() => ctx.openDisarm()} />

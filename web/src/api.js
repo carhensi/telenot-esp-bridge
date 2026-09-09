@@ -1,4 +1,5 @@
 // REST client (pure ES module). Extracted from main.jsx.
+import { waitForCommit } from "./save-config.js";
 
   const BASE = "/api/v1";
 export const API = { live: false, csrf: null };
@@ -88,7 +89,11 @@ export const API = { live: false, csrf: null };
     getMqtt: () => req("GET", "/mqtt"),
     putMqtt: (m) => req("PUT", "/mqtt", m),
     getHomekit: () => req("GET", "/homekit"),
-    applyHomekit: () => req("POST", "/homekit/apply"),
+    applyHomekit: async () => {
+      if (API.sensorEditsPending) throw new Error("Melderänderungen werden noch gespeichert. Bitte warten.");
+      await req("POST", "/homekit/apply");
+      await waitForCommit(API);
+    },
     reboot: () => req("POST", "/reboot"),
     testMqtt: () => req("POST", "/mqtt/test"),
     getMqttTest: () => req("GET", "/mqtt/test"),
@@ -105,13 +110,14 @@ export const API = { live: false, csrf: null };
     startCapture: (mode) => req("POST", "/debug/capture/start", { mode }),
     stopCapture: () => req("POST", "/debug/capture/stop"),
     getCapture: () => req("GET", "/debug/capture"),
-    async downloadCapture() {
-      const r = await fetch(BASE + "/debug/capture.bin", { credentials: "same-origin" });
+    async downloadCapture(trace = false) {
+      const name = trace ? "capture.trace" : "capture.bin";
+      const r = await fetch(BASE + "/debug/" + name, { credentials: "same-origin" });
       if (!r.ok) throw new Error("HTTP " + r.status);
       const blob = await r.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
-      a.href = url; a.download = "telenot-capture.bin";
+      a.href = url; a.download = "telenot-" + name;
       document.body.appendChild(a); a.click(); a.remove();
       window.URL.revokeObjectURL(url);
     },
@@ -154,5 +160,6 @@ export const API = { live: false, csrf: null };
     command: (cmd, pin, extra) =>
       req("POST", "/command", Object.assign({ cmd, pin: pin || undefined }, extra || {})),
     getReview: () => req("GET", "/review"),
-    commit: (warnings_acknowledged) => req("POST", "/commit", { warnings_acknowledged: !!warnings_acknowledged }),
+    commit: (warnings_acknowledged, expected_sensors, expected_confirmed) => req("POST", "/commit", { warnings_acknowledged: !!warnings_acknowledged, expected_sensors, expected_confirmed }),
+    getCommit: () => req("GET", "/commit"),
   });

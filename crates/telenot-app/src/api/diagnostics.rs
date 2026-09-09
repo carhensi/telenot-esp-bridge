@@ -22,6 +22,9 @@ pub(super) fn handle_diagnostics(app: &App) -> ApiResponse {
                 last_frame_ms: l.last_frame_ms_ago,
             },
             mqtt: MqttDiag {
+                setup_pending: app.mqtt_setup_pending,
+                publish_errors: app.mqtt_publish_errors,
+                discovery_count: app.mqtt_discovery_count,
                 status: if app.mqtt_connected {
                     "ok"
                 } else if app.setup.mqtt.host.is_empty() {
@@ -30,8 +33,9 @@ pub(super) fn handle_diagnostics(app: &App) -> ApiResponse {
                     "connecting"
                 }
                 .into(),
-                reconnects: 0,
-                last_error: None,
+                reconnects: app.mqtt_reconnects,
+                last_error: (app.mqtt_publish_errors > 0)
+                    .then(|| "MQTT-Sendefehler seit Client-Start erfasst".into()),
                 last_pub: "—".into(),
             },
             heap: app.heap.map(|(free, largest_free_block, low)| HeapDiag {
@@ -90,6 +94,9 @@ pub(super) fn handle_capture_status(app: &App) -> ApiResponse {
     ok_json(
         200,
         &CaptureStatusDto {
+            hiplex_probe: c.hiplex_probe,
+            trace_used: c.trace_used(),
+            trace_full: c.trace_full,
             active: c.active,
             mode: c.mode.as_str().into(),
             sends: c.mode.sends_desc().into(),

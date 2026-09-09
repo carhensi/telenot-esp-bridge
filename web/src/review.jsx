@@ -8,6 +8,15 @@ import { PageHead, WizFooter } from './wizard.jsx';
 function ScreenReview({ ctx }) {
   const { t, sensors, mqtt, sec } = ctx;
   const [ack, setAck] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const savingRef = React.useRef(false);
+  const save = async () => {
+    if (savingRef.current) return;
+    savingRef.current = true;
+    setSaving(true);
+    try { await ctx.commit(); }
+    finally { savingRef.current = false; setSaving(false); }
+  };
   const conf = sensors.filter((s) => s.status === "confirmed").length;
   const excl = sensors.filter((s) => s.status === "excluded").length;
   const unconf = sensors.filter((s) => s.status === "unconfirmed").length;
@@ -58,7 +67,7 @@ function ScreenReview({ ctx }) {
 
       {scanning && <div style={{ marginTop: "var(--space-3)" }}><Callout tone="info" icon="info">{t("s8.scanrunning")}</Callout></div>}
       <div style={{ marginTop: "var(--space-3)" }}><Callout tone="info" title={t("s0.vdstitle")}>{t("s8.vds")}</Callout></div>
-      <WizFooter ctx={ctx} nextLabel={t("s8.commit")} nextVariant="primary" nextDisabled={(needAck && !ack) || scanning} hint={scanning ? t("s8.scanwait") : null} onNext={ctx.commit} />
+      <WizFooter ctx={ctx} nextLabel={saving ? "Speichern wird geprüft ..." : t("s8.commit")} nextVariant="primary" nextDisabled={saving || (needAck && !ack) || scanning} hint={scanning ? t("s8.scanwait") : null} onNext={save} />
     </div>
   );
 }

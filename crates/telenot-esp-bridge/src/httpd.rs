@@ -13,7 +13,7 @@ use esp_idf_svc::http::server::{Configuration, EspHttpConnection, EspHttpServer,
 use esp_idf_svc::http::Method as EspMethod;
 use esp_idf_svc::io::{EspIOError, Write};
 use esp_idf_svc::sys::EspError;
-use telenot_app::api::{check_auth_and_setup_gate, dispatch, origin_matches_host};
+use telenot_app::api::{check_auth, check_auth_and_setup_gate, dispatch, origin_matches_host};
 use telenot_app::ota::{len_ok, OtaState};
 use telenot_app::{ApiRequest, App, Method, OtaPhase};
 
@@ -21,8 +21,7 @@ use telenot_app::{ApiRequest, App, Method, OtaPhase};
 /// needed: `web/scripts/assemble.sh && npm --prefix web run build`.
 const INDEX_HTML: &[u8] = include_bytes!("../../../web/dist/index.html");
 
-/// Upper limit for request bodies (config commit is the largest case).
-const MAX_BODY: usize = 256 * 1024;
+// Per-route body limits live in telenot_app::http_policy and are applied before allocation.
 
 /// Starts the HTTP server. The returned handle must be kept alive (drop = stop).
 pub fn start(app: Arc<Mutex<App>>, port: u16) -> Result<EspHttpServer<'static>, EspError> {
@@ -101,19 +100,57 @@ fn serve(
         (Some(_), None) => false,
     };
 
-    // Read body (chunked until EOF/Content-Length).
-    let mut body = Vec::new();
+    // Authenticate before allocating/reading a potentially large body. The public
+    // routes stay exempt; dispatch() runs its own (identical) gate afterwards.
+    if !(method == Method::Post && path == "/api/v1/session"
+        || method == Method::Get && path == "/api/v1/device")
+    {
+        let checked = {
+            let a = app.lock().unwrap();
+            check_auth(
+                &a,
+                session.as_deref(),
+                csrf.as_deref(),
+                origin_ok,
+                method.is_mutating(),
+            )
+        };
+        if let Err(response) = checked {
+            let mut out = req.into_response(
+                response.status,
+                None,
+                &[("Content-Type", "application/json")],
+            )?;
+            out.write_all(&response.body)?;
+            return Ok(());
+        }
+    }
+
+    // Read body (chunked until EOF/Content-Length), bounded per route.
+    let max_body = telenot_app::http_policy::body_limit(&path);
+    let expected = req
+        .header("Content-Length")
+        .and_then(|s| s.parse::<usize>().ok());
+    if expected.is_some_and(|n| n > max_body) {
+        return write_error(
+            req,
+            413,
+            "body_too_large",
+            "Anfrage zu gross fuer diesen Endpunkt",
+        );
+    }
+    let mut body = Vec::with_capacity(expected.unwrap_or(0));
     let mut buf = [0u8; 1024];
     loop {
         let n = req.read(&mut buf)?;
         if n == 0 {
             break;
         }
-        body.extend_from_slice(&buf[..n]);
-        if body.len() > MAX_BODY {
+        if body.len().saturating_add(n) > max_body {
             req.into_status_response(413)?;
             return Ok(());
         }
+        body.extend_from_slice(&buf[..n]);
     }
 
     let api_req = ApiRequest {

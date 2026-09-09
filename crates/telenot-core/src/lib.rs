@@ -180,6 +180,12 @@ pub struct Core {
     areas: BTreeMap<u8, AreaState>,
     /// Last logical "active" state per sensor address (change detection).
     sensor_state: BTreeMap<u16, bool>,
+    sensor_seen: Vec<Tick>,
+    last_area_status: Option<Tick>,
+    /// Panel-selection plausibility: consecutive area snapshots whose mode bits fit the
+    /// OTHER panel's base better; one latched diagnostic warning per boot at 3.
+    panel_mismatch_streak: u8,
+    panel_mismatch_warned: bool,
     /// Bypass state per detection area (readback from `mb_gesperrt_base`+). Only
     /// observed transitions or bypassed areas are published (no boot topic flood).
     mb_bypassed: BTreeMap<u16, bool>,
@@ -271,6 +277,10 @@ impl Core {
     pub fn new(config: Arc<Config>, opts: CoreOptions) -> Self {
         let profile = profile::from_config_kind(config.panel.kind);
         Core {
+            sensor_seen: vec![Tick::MAX; config.sensors.len()],
+            last_area_status: None,
+            panel_mismatch_streak: 0,
+            panel_mismatch_warned: false,
             config,
             opts,
             profile,
@@ -567,6 +577,40 @@ impl Core {
     /// Periodic tick: checks the serial liveness deadline and command ACK timeout.
     pub fn on_tick(&mut self, now: Tick) -> Vec<Action> {
         let mut actions = Vec::new();
+        for (i, seen) in self.sensor_seen.iter_mut().enumerate() {
+            if *seen != Tick::MAX && now.saturating_sub(*seen) > SERIAL_DEADLINE_MS {
+                *seen = Tick::MAX;
+                let s = self
+                    .config
+                    .sensors
+                    .get(i)
+                    .expect("timestamp index matches config");
+                self.sensor_state.remove(&s.address());
+                if s.confirmed() {
+                    actions.push(Action::Publish {
+                        topic: format!("sensor/{}/availability", s.topic()),
+                        payload: "offline".into(),
+                        retain: true,
+                    });
+                }
+            }
+        }
+        if self.hiplex_plus()
+            && self
+                .last_area_status
+                .is_some_and(|t| now.saturating_sub(t) > SERIAL_DEADLINE_MS)
+        {
+            self.last_area_status = None;
+            self.arm_state = ArmState::Unknown;
+            self.areas.clear();
+            for topic in ["state", "area/1/state"] {
+                actions.push(Action::Publish {
+                    topic: topic.into(),
+                    payload: "unknown".into(),
+                    retain: true,
+                });
+            }
+        }
         if self.availability == Availability::Online {
             // `None` = no frame ever received since boot (e.g. flashed/booted without panel)
             // → go offline after the deadline; otherwise `availability` would stay "online" forever.
@@ -695,6 +739,8 @@ impl Core {
         self.arm_state = ArmState::Unknown;
         self.areas.clear();
         self.sensor_state.clear();
+        self.sensor_seen.fill(Tick::MAX);
+        self.last_area_status = None;
         self.mb_bypassed.clear();
         actions.push(Action::Publish {
             topic: "availability".into(),
@@ -795,11 +841,173 @@ impl Core {
         }
     }
 
+    fn hiplex_plus(&self) -> bool {
+        self.config.panel.kind == telenot_config::PanelKind::Hiplex8400
+            && self.config.panel.gms_variant == telenot_config::GmsVariant::Plus
+    }
+
+    /// Panel-selection plausibility (diagnostics only, never switches behavior): the
+    /// complex carries its area mode bits at 0x0530.., hiplex GMS plus at 0x0500.. —
+    /// if the selected panel's bits repeatedly show no/contradictory mode while the
+    /// other base shows a consistent one, log a single warning per boot.
+    fn check_panel_plausibility(&mut self, bs: &BlockStatus, actions: &mut Vec<Action>) {
+        if self.panel_mismatch_warned || bs.adresserweiterung != 2 || bs.geraet_bereich != 0 {
+            return;
+        }
+        let valid = |base: u16| -> Option<bool> {
+            let bits = [
+                bs.raw_bit(base)?,
+                bs.raw_bit(base + 1)?,
+                bs.raw_bit(base + 2)?,
+                bs.raw_bit(base + 3)?,
+            ];
+            let active = |i: usize| !bits[i];
+            Some(active(3) || (0..3).filter(|&i| active(i)).count() == 1)
+        };
+        let (own, other, hint) = if self.hiplex_plus() {
+            (valid(0x0500), valid(0x0530), "complex")
+        } else {
+            (valid(0x0530), valid(0x0500), "hiplex")
+        };
+        if own == Some(false) && other == Some(true) {
+            self.panel_mismatch_streak = self.panel_mismatch_streak.saturating_add(1);
+            if self.panel_mismatch_streak >= 3 {
+                self.panel_mismatch_warned = true;
+                actions.push(Action::Log(format!(
+                    "Statusmuster passt eher zu {hint} — Zentralen-Auswahl im Setup prüfen"
+                )));
+            }
+        } else {
+            self.panel_mismatch_streak = 0;
+        }
+    }
+
+    /// Read-only mapping verified by independent status snapshots and manual panel events.
+    /// Keep the command profile untouched; only area 1 has been observed on GMS Plus.
+    fn apply_hiplex_area(&mut self, bs: &BlockStatus, actions: &mut Vec<Action>) {
+        if bs.adresserweiterung != 2 {
+            return;
+        }
+        let (Some(a), Some(b), Some(c), Some(d)) = (
+            bs.raw_bit(0x0500),
+            bs.raw_bit(0x0501),
+            bs.raw_bit(0x0502),
+            bs.raw_bit(0x0503),
+        ) else {
+            return;
+        };
+        let bits = [a, b, c, d];
+        let active = |bit: usize| !bits[bit];
+        let state = if active(3) {
+            ArmState::Triggered
+        } else if (0..3).filter(|&i| active(i)).count() != 1 {
+            ArmState::Unknown
+        } else if active(2) {
+            ArmState::ArmedAway
+        } else if active(1) {
+            ArmState::ArmedHome
+        } else {
+            ArmState::Disarmed
+        };
+        let first = self.last_area_status.is_none();
+        self.last_area_status = self.last_frame_at;
+        self.areas.entry(1).or_default().arm = state;
+        if first || state != self.arm_state {
+            self.arm_state = state;
+            for topic in ["state", "area/1/state"] {
+                actions.push(Action::Publish {
+                    topic: topic.into(),
+                    payload: state.as_str().into(),
+                    retain: true,
+                });
+            }
+        }
+    }
+
+    /// Stream current retained state after MQTT recovery, without another full sensor list.
+    pub fn republish_for_each(&self, emit: &mut dyn FnMut(Action)) {
+        let publish = |topic: String, payload: &str, emit: &mut dyn FnMut(Action)| {
+            emit(Action::Publish {
+                topic,
+                payload: payload.into(),
+                retain: true,
+            })
+        };
+        publish(
+            "availability".into(),
+            if self.availability == Availability::Online && self.last_frame_at.is_some() {
+                "online"
+            } else {
+                "offline"
+            },
+            emit,
+        );
+        publish("state".into(), self.arm_state.as_str(), emit);
+        if self.hiplex_plus() {
+            publish("area/1/state".into(), self.arm_state.as_str(), emit);
+        }
+        for (&area, state) in &self.areas {
+            if !self.hiplex_plus() && self.profile.areas.count > 1 {
+                publish(format!("area/{area}/state"), state.arm.as_str(), emit);
+            }
+        }
+        // Readiness + bypass readback are retained change-only topics too — without
+        // them a transition during a broker outage stays stale in HA forever (the
+        // disconnected sink drops publishes instead of queueing them).
+        let multi = self.profile.areas.count > 1;
+        for (&area, st) in &self.areas {
+            for (slot, suffix) in [(st.intern_bereit, "intern"), (st.extern_bereit, "extern")] {
+                if let Some(ready) = slot {
+                    let topic = if multi {
+                        format!("area/{area}/ready/{suffix}")
+                    } else {
+                        format!("ready/{suffix}")
+                    };
+                    publish(topic, if ready { "yes" } else { "no" }, emit);
+                }
+            }
+        }
+        for (&mb, &bypassed) in &self.mb_bypassed {
+            publish(
+                format!("mb/{mb}/bypassed"),
+                if bypassed { "ON" } else { "OFF" },
+                emit,
+            );
+        }
+        for s in self.config.sensors.iter().filter(|s| s.confirmed()) {
+            let active = self.sensor_state.get(&s.address());
+            publish(
+                format!("sensor/{}/availability", s.topic()),
+                if active.is_some() {
+                    "online"
+                } else {
+                    "offline"
+                },
+                emit,
+            );
+            publish(
+                format!("sensor/{}/state", s.topic()),
+                match active {
+                    Some(true) => "ON",
+                    Some(false) => "OFF",
+                    None => "unknown",
+                },
+                emit,
+            );
+        }
+    }
+
     /// Apply a snapshot: update sensor states and derive the arm state.
     fn apply_block_status(&mut self, bs: &BlockStatus, actions: &mut Vec<Action>) {
         // Only real status blocks (inputs 0x01 / outputs 0x02) drive state.
         // Occupancy/Discovery responses (0x71/0x72) must NOT corrupt live status.
         if !matches!(bs.adresserweiterung, 0x01 | 0x02) {
+            return;
+        }
+        // hiplex GMS plus: only device 0 is verified — other device namespaces must not
+        // alias into the area/sensor state. The complex path stays device-agnostic
+        // (the documented reference telegram uses Geraet 0x10; no regression allowed).
+        if self.hiplex_plus() && bs.geraet_bereich != 0 {
             return;
         }
         // Track states of ALL configured sensors in this block — including unconfirmed ones,
@@ -811,8 +1019,18 @@ impl Core {
             .config
             .sensors
             .iter()
-            .filter_map(|s| {
+            .enumerate()
+            .filter_map(|(i, s)| {
                 let raw = bs.raw_bit(s.address())?;
+                let was_missing = self.sensor_seen[i] == Tick::MAX;
+                self.sensor_seen[i] = self.last_frame_at.unwrap_or(0);
+                if was_missing && s.confirmed() {
+                    actions.push(Action::Publish {
+                        topic: format!("sensor/{}/availability", s.topic()),
+                        payload: "online".into(),
+                        retain: true,
+                    });
+                }
                 let active = s.polarity().is_active(raw)?;
                 if self.sensor_state.get(&s.address()) == Some(&active) {
                     return None;
@@ -833,6 +1051,11 @@ impl Core {
             }
         }
 
+        self.check_panel_plausibility(bs, actions);
+        if self.hiplex_plus() {
+            self.apply_hiplex_area(bs, actions);
+            return; // Unverified readiness/MB offsets must not be interpreted as real states.
+        }
         // Derive arm state + arm readiness per area from blocks that contain area status.
         let count = self.profile.areas.count;
         let mut any_area_seen = false;

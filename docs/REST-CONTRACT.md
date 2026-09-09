@@ -56,7 +56,9 @@ wiederverwendet.
 | GET | `/diagnostics/log?since_seq=N` | → `{entries:[{seq,t_ms,level,msg}], dropped}` | S7 |
 | GET | `/state` | → `{arm_state, availability, intern_ready?, extern_ready?, sensor_states:[{address,active}], polarity_observed?}` (5 s / Header-Puls) | Header/S4 |
 | GET | `/review` | → `{counts, mqtt_target, mqtt_tested, ha_discovery, remote_disarm, schema_version, warnings:[{code,severity,count,message}]}` | S8 |
-| POST | `/commit` | `{warnings_acknowledged?}` → `200 {rebooting}`; `400 invalid_config`; `409 warnings_unacknowledged` | S8 |
+| POST | `/commit` | `{warnings_acknowledged?, expected_sensors?, expected_confirmed?}` → `202 {rebooting:false}`; `400 invalid_config`; `409 warnings_unacknowledged/commit_pending/inventory_changed` | S8 |
+| GET | `/commit` | `{state:"idle"|"pending"|"saved"|"failed", sensors?, message?}` — Speicherbestätigung des Owners | S8/HomeKit |
+| POST | `/homekit/apply` | `202 {rebooting:false}`; gleicher Speicherauftrag wie `/commit`, danach HAP-Abgleich ohne Neustart; Abschluss über `GET /commit` | HomeKit |
 | POST | `/command` | `{cmd:arm_away\|arm_home\|arm_night\|disarm\|reset\|bypass_on\|bypass_off\|output_on\|output_off, pin?, mb?, addr?}` → `202` (Live-Test-Board; PIN-Gate + Ausführung im Gerät; Disarm/Bypass-Sperren fail-closed, `mb` 1–512 nur für Bypass (Profil-Limit prüft der Core), `area?` 1–16 für Arm auf Multi-Bereich-Anlagen) | Live-Test |
 
 ## Sensor-Objekt
@@ -104,3 +106,14 @@ der <3 s-Serial-ACK-Loop unberührt.
 Ein optionales, vom Wizard **getrenntes** Steuer-Board (`GET /state` 2 s-Poll für offene Melder +
 Alarmzustand, `POST /command` für Arm/Disarm). Disarm ist **fail-closed** (PIN-Gate bzw. Opt-in);
 Arm ist im Core pre-arm-gegated. Auf dem Host läuft die Ausführung im Daemon, nie im Serial-Owner.
+
+Speicheraufträge konsumieren die aktuelle Melderauswahl. Erst nach erfolgreichem Schreiben
+meldet `/commit` den Zustand `saved`; bei Fehlern bleibt die Auswahl zur Korrektur erhalten.
+`/reboot` weist laufende/fehlgeschlagene Speicheraufträge sowie neue ungespeicherte
+Melderänderungen mit `409` ab. HomeKit-Apply verwendet denselben Ablauf.
+
+Die Firmware schreibt ausstehende HA-Entity-Löschungen vor dem Config-Wechsel in ein
+begrenztes NVS-Journal (maximal 1200 Einträge, je Adresse und Entity-Typ). Nach einem
+Neustart werden noch benötigte Löschungen vor der HA-Discovery fortgesetzt. Ein Auftrag
+verschwindet erst nach MQTT-PUBACK oder wenn die aktive Config die Entity wieder enthält.
+Schreibfehler am Journal verhindern die Bestätigung eines neuen Config-Wechsels.

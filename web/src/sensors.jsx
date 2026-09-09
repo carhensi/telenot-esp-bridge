@@ -2,6 +2,7 @@
 import React from 'preact/compat';
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 import { API } from './api.js';
+import { applySensorEdits } from './sensor-edits.js';
 import { Icon, Button, Badge, StatusDot, Checkbox, Toggle, Field, Modal, Callout, STAT_TONE, copyText, hex } from './ui.jsx';
 
 
@@ -299,25 +300,24 @@ function SensorTable({ ctx, sensors, setSensors, t, lang, toast }) {
   const [drawer, setDrawer] = useState(null); // sensor address or null
   const [expOpen, setExpOpen] = useState(false);
 
+  const editQueue = useRef(Promise.resolve());
   const patch = useCallback((addrs, fn) => {
-    // addrs may be a Set, an array (e.g. "confirm all" → visibleAddrs), or a single address.
-    // Formerly an array was mistakenly wrapped as new Set([array]) → one broken composite address.
-    const set = addrs instanceof Set ? addrs : new Set(Array.isArray(addrs) ? addrs : [addrs]);
-    setSensors((prev) => prev.map((s) => set.has(s.address) ? { ...s, ...fn(s) } : s));
-    set.forEach((addr) => {
-      const s = sensors.find((x) => x.address === addr) || { address: addr };
-      const fields = fn(s);
-      // Stage for HomeKit: on show_in_homekit toggle OR rename (name/name_ha) of a sensor already
-      // in HomeKit — only in HomeKit mode. This also triggers the "Apply" bar on rename.
-      const hkTouched = "show_in_homekit" in fields
-        || ((("name" in fields) || ("name_ha" in fields)) && s.show_in_homekit);
-      if (hkTouched && ctx && ctx.mqtt && ctx.mqtt.homekit_mode) ctx.hkMark(addr);
-      // Live: send the same change to the backend (status is UI-derived → omit). Do NOT
-      // silently swallow errors — otherwise a rejected save looks like "doesn't work".
-      if (API && API.live) {
-        const { status, ...rest } = fields;
-        API.patchSensor(addr, rest).catch(() => toast("err", t("s4.savefail")));
-      }
+    const addresses = [...(addrs instanceof Set ? addrs : new Set(Array.isArray(addrs) ? addrs : [addrs]))];
+    const edits = addresses.map(address => ({address, fields: fn(sensors.find(s => s.address === address) || {address})}));
+    if (!(API && API.live)) {
+      setSensors(prev => prev.map(s => { const edit = edits.find(e => e.address === s.address); return edit ? {...s, ...edit.fields} : s; }));
+      return;
+    }
+    API.sensorEditsPending = (API.sensorEditsPending || 0) + 1;
+    editQueue.current = editQueue.current.then(async () => {
+      try {
+        const updates = await applySensorEdits(API, edits);
+        setSensors(prev => prev.map(s => updates.has(s.address) ? {...s, ...updates.get(s.address)} : s));
+        if (ctx.mqtt.homekit_mode) edits.filter(e => 'show_in_homekit' in e.fields || 'name' in e.fields || 'name_ha' in e.fields).forEach(e => ctx.hkMark(e.address));
+      } catch (e) {
+        toast('err', t('s4.savefail') + ' ' + e.message);
+        try { const fresh = await API.getSensors(); setSensors(fresh.sensors); } catch (_) { /* preserve last confirmed UI state */ }
+      } finally { API.sensorEditsPending--; }
     });
   }, [setSensors, sensors, ctx, toast, t]);
 
@@ -378,24 +378,15 @@ function SensorTable({ ctx, sensors, setSensors, t, lang, toast }) {
   const applyExpert = useCallback((changes, confirmAddrs) => {
     const map = new Map(changes.map((c) => { const { address, ...rest } = c; return [address, rest]; }));
     const confirmSet = confirmAddrs ? new Set(confirmAddrs) : null;
-    const patches = new Map(); // address → Backend-Payload
-    setSensors(sensors.map((s) => {
+    const addresses = new Set([...map.keys(), ...(confirmSet || [])]);
+    patch(addresses, s => {
       const c = map.get(s.address) || {};
-      const inConfirm = confirmSet && confirmSet.has(s.address);
-      if (!map.has(s.address) && !inConfirm) return s;
-      const next = { ...s, ...c };
-      const excluded = c.include !== undefined ? !c.include : next.status === "excluded";
-      if (inConfirm && !excluded && next.polarity !== "unconfirmed") next.confirmed = true;
-      next.status = excluded ? "excluded" : (next.confirmed ? "confirmed" : "unconfirmed");
-      const payload = { ...c };
-      if (next.confirmed !== s.confirmed) payload.confirmed = next.confirmed;
-      if (Object.keys(payload).length) patches.set(s.address, payload);
-      return next;
-    }));
-    if (API && API.live) {
-      patches.forEach((payload, address) => { API.patchSensor(address, payload).catch(() => {}); });
-    }
-  }, [setSensors, sensors]);
+      const next = {...s, ...c};
+      const excluded = c.include !== undefined ? !c.include : next.status === 'excluded';
+      const confirmed = confirmSet?.has(s.address) && !excluded && next.polarity !== 'unconfirmed' ? true : next.confirmed;
+      return {...c, confirmed, status: excluded ? 'excluded' : confirmed ? 'confirmed' : 'unconfirmed'};
+    });
+  }, [patch]);
 
   const s4total = counts.conf + counts.unconf;
   const s4pct = s4total > 0 ? Math.round((counts.conf / s4total) * 100) : 100;

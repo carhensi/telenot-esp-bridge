@@ -26,6 +26,10 @@ const SCAN_SECS_PER_ADDR: u64 = 6;
 #[derive(Debug, Clone)]
 pub enum Intent {
     StartScan,
+    /// Scan with an explicit (possibly not-yet-committed) panel selection — the setup
+    /// wizard scans BEFORE the config commit, so the live core profile may still be
+    /// the old panel. The live core configuration is never switched by this.
+    StartScanFor(telenot_config::PanelSettings),
     CancelScan {
         keep_partial: bool,
     },
@@ -147,10 +151,17 @@ impl Default for LiveSnapshot {
 pub type ScanView = ScanMeta;
 
 pub struct Runtime {
+    /// Bounded hiplex read probes for the debug Discover capture (never seeds inventory).
+    diagnostic_probe: Option<crate::diagnostic_probe::DiagnosticProbe>,
     core: Core,
     decoder: FrameDecoder,
     discovery: Discovery,
     disarm_enabled: bool,
+
+    /// Panel selection the CURRENT scan runs under (see [`Intent::StartScanFor`]).
+    scan_panel: telenot_config::PanelSettings,
+    occupancy_last_ms: Option<Tick>,
+    occupancy_attempts: u8,
 
     // Scan-Pacing
     scanning: bool,
@@ -184,6 +195,10 @@ pub struct Runtime {
 impl Runtime {
     pub fn new(config: Arc<Config>, disarm_enabled: bool) -> Self {
         Runtime {
+            diagnostic_probe: None,
+            scan_panel: config.panel.clone(),
+            occupancy_last_ms: None,
+            occupancy_attempts: 0,
             core: Core::new(config, CoreOptions { disarm_enabled }),
             decoder: FrameDecoder::new(),
             discovery: Discovery::new(),
@@ -242,7 +257,13 @@ impl Runtime {
                     // window (it replaces the ACK there) — otherwise the panel won't respond.
                     // No poll / nothing to send → normal ACK/processing via the core.
                     let is_poll = matches!(frame.function(), Some(Function::SendNorm));
-                    if self.scanning && is_poll && self.advance_scan(now, &mut actions) {
+                    let probe_sent = self
+                        .diagnostic_probe
+                        .as_mut()
+                        .is_some_and(|probe| probe.on_frame(now, &frame, &mut actions));
+                    if probe_sent
+                        || (self.scanning && is_poll && self.advance_scan(now, &mut actions))
+                    {
                         // Query occupies the transmit window — no additional ACK.
                     } else {
                         for a in self.core.on_frame(now, &frame) {
@@ -261,6 +282,21 @@ impl Runtime {
     pub fn tick(&mut self, now: Tick) -> Vec<Action> {
         self.last_now = now;
         let mut actions = self.core.on_tick(now);
+        if self.scanning
+            && self.hiplex_plus()
+            && !self.text_queued
+            && now.saturating_sub(self.scan_started_ms) >= 30_000
+        {
+            self.scanning = false;
+            self.discovery = Discovery::new();
+            self.discovered_cache = None;
+            actions.push(Action::Log(
+                "hiplex-Discovery abgebrochen: Zeitlimit bei Eingangsbelegung".into(),
+            ));
+        }
+        if let Some(probe) = &mut self.diagnostic_probe {
+            probe.tick(now, &mut actions);
+        }
         if let Some(obs) = &self.obs {
             if obs.expired(now) {
                 actions.push(Action::Log(format!(
@@ -299,14 +335,41 @@ impl Runtime {
     /// remote disarm was enabled during setup). Keeps the core's own fail-closed gate
     /// (telenot-core) consistent with the setup setting.
     pub fn reload(&mut self, cfg: Arc<Config>, disarm_enabled: bool) {
+        self.diagnostic_probe = None;
         self.disarm_enabled = disarm_enabled;
         self.core = Core::new(cfg, CoreOptions { disarm_enabled });
+    }
+
+    /// Debug Discover capture: on hiplex, run only the bounded read probes instead of a
+    /// full inventory scan. Setup may not be committed yet — probes are selected without
+    /// changing the live core profile, and no inventory is ever seeded from them.
+    pub fn start_capture_scan(&mut self, now: Tick, panel_kind: telenot_config::PanelKind) {
+        if panel_kind == telenot_config::PanelKind::Hiplex8400 {
+            self.apply_intent(
+                now,
+                Intent::CancelScan {
+                    keep_partial: false,
+                },
+            );
+            self.scan_result = None;
+            self.discovered_cache = None;
+            self.diagnostic_probe = Some(crate::diagnostic_probe::DiagnosticProbe::new(now));
+        } else {
+            self.apply_intent(now, Intent::StartScan);
+        }
     }
 
     /// Apply an intent (scan/polarity/reload). `TestMqtt` is ignored by the runtime.
     pub fn apply_intent(&mut self, now: Tick, intent: Intent) {
         match intent {
             Intent::StartScan => {
+                self.apply_intent(now, Intent::StartScanFor(self.core.config().panel.clone()));
+            }
+            Intent::StartScanFor(panel) => {
+                self.scan_panel = panel;
+                self.occupancy_last_ms = None;
+                self.occupancy_attempts = 0;
+                self.diagnostic_probe = None;
                 self.discovery = Discovery::new();
                 self.scanning = true;
                 self.scan_done = false;
@@ -321,11 +384,19 @@ impl Runtime {
                 self.discovered_rev = (usize::MAX, usize::MAX);
             }
             Intent::CancelScan { keep_partial } => {
+                if self.diagnostic_probe.take().is_some() {
+                    self.scan_result = None;
+                    self.scanning = false;
+                    self.scan_done = false;
+                    return;
+                }
                 if keep_partial {
                     self.scan_done = true;
                     self.scan_result = Some((
-                        self.discovery
-                            .into_config_for(self.core.profile(), &self.core.config().panel),
+                        self.discovery.into_config_for(
+                            telenot_core::profile::from_config_kind(self.scan_panel.kind),
+                            &self.scan_panel,
+                        ),
                         self.discovery.raw_names().clone(),
                     ));
                 } else {
@@ -339,6 +410,7 @@ impl Runtime {
                 self.obs = Some(PolarityObservation::new(address, now, POLARITY_WINDOW_MS));
             }
             Intent::ReloadConfig(cfg) => {
+                self.diagnostic_probe = None;
                 self.core = Core::new(
                     cfg,
                     CoreOptions {
@@ -358,6 +430,27 @@ impl Runtime {
             Intent::CaptureStart { .. } | Intent::CaptureStop => { /* handled in the serial loop
                  (App::capture + TX gate); Discover also starts a scan there */
             }
+        }
+    }
+
+    /// Stream current retained state after MQTT recovery (delegates to the core).
+    pub fn republish_for_each(&self, emit: &mut dyn FnMut(Action)) {
+        self.core.republish_for_each(emit);
+    }
+
+    fn hiplex_plus(&self) -> bool {
+        self.scan_panel.kind == telenot_config::PanelKind::Hiplex8400
+            && self.scan_panel.gms_variant == telenot_config::GmsVariant::Plus
+    }
+
+    /// Scan-phase gate: hiplex GMS plus never sees a separate outputs occupancy block
+    /// (the 0x72 query is answered with the same 0x71 block — verified on the 8400H),
+    /// so its occupancy phase ends when the text queries have been queued.
+    fn belegt_complete(&self) -> bool {
+        if self.hiplex_plus() {
+            self.text_queued
+        } else {
+            self.discovery.belegt_complete()
         }
     }
 
@@ -397,7 +490,7 @@ impl Runtime {
             ScanPhase::Done
         } else if !self.scanning {
             ScanPhase::Idle
-        } else if !self.discovery.belegt_complete() {
+        } else if !self.belegt_complete() {
             ScanPhase::Belegt
         } else {
             ScanPhase::Naming
@@ -411,7 +504,7 @@ impl Runtime {
         // discovery is released (seed done), the numbers come from scan_final.
         let total = if let Some((t, _)) = self.scan_final {
             t
-        } else if self.discovery.belegt_complete() {
+        } else if self.belegt_complete() {
             self.discovery.occupied().len()
         } else {
             0
@@ -431,8 +524,10 @@ impl Runtime {
             let rev = (self.discovery.named_count(), self.queries.len());
             if self.discovered_cache.is_none() || self.discovered_rev != rev {
                 self.discovered_cache = Some(std::sync::Arc::new((
-                    self.discovery
-                        .into_config_for(self.core.profile(), &self.core.config().panel),
+                    self.discovery.into_config_for(
+                        telenot_core::profile::from_config_kind(self.scan_panel.kind),
+                        &self.scan_panel,
+                    ),
                     self.discovery.raw_names().clone(),
                 )));
                 self.discovered_rev = rev;
@@ -511,32 +606,79 @@ impl Runtime {
         }
     }
 
-    fn ingest_discover(&mut self, frame: &Frame, _actions: &mut Vec<Action>) {
+    fn ingest_discover(&mut self, frame: &Frame, actions: &mut Vec<Action>) {
+        let hiplex = self.hiplex_plus();
         let mut got_response = false;
 
         for rec in frame.records().filter_map(|r| r.ok()) {
             if let Some(bs) = rec.as_block_status() {
-                if matches!(bs.adresserweiterung, 0x71 | 0x72) {
+                // hiplex plus: only inputs occupancy from device 0, and only AFTER our own
+                // query went out — pre-query blocks and other devices must not seed the scan.
+                let accepted = if hiplex {
+                    bs.adresserweiterung == 0x71
+                        && bs.geraet_bereich == 0
+                        && self.occupancy_attempts > 0
+                        && !self.text_queued
+                } else {
+                    matches!(bs.adresserweiterung, 0x71 | 0x72)
+                };
+                if accepted {
                     self.discovery.ingest_belegt(&bs);
-                    if self.discovery.belegt_complete() {
+                    if hiplex {
+                        self.occupancy_last_ms = Some(self.last_now);
+                        // ingest_belegt caps `occupied` at MAX_SENSORS — a full set means the
+                        // panel reported at least the limit: fail loudly, never truncate silently.
+                        if self.discovery.occupied().len() >= telenot_config::MAX_SENSORS {
+                            self.scanning = false;
+                            self.discovery = Discovery::new();
+                            actions.push(Action::Log(
+                                "hiplex-Discovery abgebrochen: Gerätelimit überschritten".into(),
+                            ));
+                            return;
+                        }
+                    } else if self.discovery.belegt_complete() {
                         got_response = true;
                     }
                 }
             }
         }
 
-        // Text response: 0x0C carries the address, 0x54 the plain-text name.
-        let addr = frame
-            .records()
-            .filter_map(|r| r.ok())
-            .find_map(|r| r.as_bereich_meldebereich().map(|bm| bm.address()));
-        let name = frame
-            .records()
-            .filter_map(|r| r.ok())
-            .find_map(|r| r.as_ascii().map(decode_panel_text));
-        if let (Some(a), Some(n)) = (addr, name) {
-            self.discovery.ingest_text(a, &n);
-            got_response = true;
+        if hiplex {
+            // GMS plus: pair only ADJACENT 0x0C/0x54 records that match the pending query —
+            // unrelated replies must not complete it (text ↔ address mixups observed risk).
+            let mut address = None;
+            for rec in frame.records().filter_map(|r| r.ok()) {
+                if let Some(bm) = rec.as_bereich_meldebereich() {
+                    address = (bm.geraet_bereich == 0
+                        && bm.adresserweiterung == 0x73
+                        && self.current == Some(bm.address())
+                        && self.awaiting_since_ms.is_some())
+                    .then(|| bm.address());
+                } else if let Some(text) = rec.as_ascii() {
+                    if let Some(a) = address.take() {
+                        self.discovery.ingest_text(a, &decode_panel_text(text));
+                        got_response = true;
+                    }
+                } else {
+                    address = None;
+                }
+            }
+        } else {
+            // complex: 0x0C and 0x54 may be separated by other records (e.g. a 0x50
+            // date/time between them, as in real alarm telegrams) — keep the
+            // frame-wide search; the strict adjacency pairing is hiplex-only.
+            let addr = frame
+                .records()
+                .filter_map(|r| r.ok())
+                .find_map(|r| r.as_bereich_meldebereich().map(|bm| bm.address()));
+            let name = frame
+                .records()
+                .filter_map(|r| r.ok())
+                .find_map(|r| r.as_ascii().map(decode_panel_text));
+            if let (Some(a), Some(n)) = (addr, name) {
+                self.discovery.ingest_text(a, &n);
+                got_response = true;
+            }
         }
 
         // "No detection point here" — a valid, panel-documented response for an address
@@ -550,8 +692,9 @@ impl Runtime {
             got_response = true;
         }
 
-        // Once both occupied telegrams are in: queue text queries.
-        if self.discovery.belegt_complete() && !self.text_queued {
+        // Once both occupied telegrams are in: queue text queries. (hiplex plus queues
+        // them in advance_scan after the occupancy response pause instead.)
+        if !hiplex && self.discovery.belegt_complete() && !self.text_queued {
             self.text_queued = true;
             for a in self.discovery.occupied() {
                 self.queries.push_back(a);
@@ -566,6 +709,19 @@ impl Runtime {
     /// Places ONE discovery query into the transmit window if one is due. Returns `true`
     /// if a frame was sent (the caller may then suppress the ACK for that poll).
     fn advance_scan(&mut self, now: Tick, actions: &mut Vec<Action>) -> bool {
+        // hiplex plus: the panel may split occupancy over several blocks — collect until a
+        // response pause (SCAN_RETRY_MS after the last block), then queue the name queries.
+        if self.hiplex_plus()
+            && !self.text_queued
+            && self.discovery.inputs_received()
+            && self
+                .occupancy_last_ms
+                .is_some_and(|t| now.saturating_sub(t) >= SCAN_RETRY_MS)
+        {
+            self.text_queued = true;
+            self.queries.extend(self.discovery.occupied());
+            self.awaiting_since_ms = None;
+        }
         let timed_out = self
             .awaiting_since_ms
             .map(|t| now.saturating_sub(t) > SCAN_RETRY_MS)
@@ -574,9 +730,21 @@ impl Runtime {
             return false;
         }
 
-        if !self.discovery.belegt_complete() {
+        if !self.belegt_complete() {
+            if self.hiplex_plus() && self.discovery.inputs_received() {
+                // Inputs seen, response pause not yet over → keep collecting, send nothing.
+                return false;
+            }
+            if self.hiplex_plus() && self.occupancy_attempts >= 3 {
+                self.scanning = false;
+                actions.push(Action::Log(
+                    "hiplex-Discovery abgebrochen: keine Eingangsbelegung empfangen".into(),
+                ));
+                return false;
+            }
             let mut b = [0u8; 32];
             if let Ok(n) = encode_belegt_query(&mut b) {
+                self.occupancy_attempts = self.occupancy_attempts.saturating_add(1);
                 actions.push(Action::SendFrame(b[..n].to_vec()));
                 self.awaiting_since_ms = Some(now);
                 return true;
@@ -596,8 +764,10 @@ impl Runtime {
             self.scan_done = true;
             self.current = None;
             self.scan_result = Some((
-                self.discovery
-                    .into_config_for(self.core.profile(), &self.core.config().panel),
+                self.discovery.into_config_for(
+                    telenot_core::profile::from_config_kind(self.scan_panel.kind),
+                    &self.scan_panel,
+                ),
                 self.discovery.raw_names().clone(),
             ));
             actions.push(Action::Log(format!(
@@ -639,6 +809,195 @@ mod tests {
             }),
             false,
         )
+    }
+
+    fn hiplex_scan() -> Runtime {
+        let mut r = rt();
+        let panel = telenot_config::PanelSettings {
+            kind: telenot_config::PanelKind::Hiplex8400,
+            gms_variant: telenot_config::GmsVariant::Plus,
+            ..Default::default()
+        };
+        r.apply_intent(0, Intent::StartScanFor(panel));
+        assert!(r.advance_scan(0, &mut Vec::new()));
+        r
+    }
+
+    fn ingest_at(r: &mut Runtime, now: Tick, data: &[u8]) {
+        r.last_now = now;
+        r.ingest_discover(&Frame::new(data).unwrap(), &mut Vec::new());
+    }
+
+    #[test]
+    fn hiplex_inputs_only_scan_preserves_unnamed_and_setup_profile() {
+        let mut r = hiplex_scan();
+        ingest_at(&mut r, 100, &[0x73, 2, 5, 0x24, 1, 1, 0, 0x71, 0]);
+        assert!(
+            !r.discovery.inputs_received(),
+            "other devices must not alias device zero"
+        );
+        ingest_at(&mut r, 200, &[0x73, 2, 5, 0x24, 0, 1, 0, 0x71, 0xFE]);
+        ingest_at(&mut r, 300, &[0x73, 2, 5, 0x24, 0, 1, 8, 0x71, 0xFE]);
+        assert!(
+            !r.advance_scan(4200, &mut Vec::new()),
+            "collect split blocks"
+        );
+        let mut actions = Vec::new();
+        assert!(r.advance_scan(4300, &mut actions));
+        assert_eq!(r.current, Some(0x100));
+        assert!(matches!(&actions[0], Action::SendFrame(b) if b[11] == 0x73 && b[12] == 0x0C));
+        ingest_at(
+            &mut r,
+            4400,
+            &[
+                0x73, 2, 6, 0x0C, 0, 1, 8, 0x73, 0xFE, 1, 3, 0x54, b'B', b'W', b'M',
+            ],
+        );
+        assert_eq!(
+            r.discovery.named_count(),
+            0,
+            "unrelated address cannot complete pending query"
+        );
+        assert!(r.awaiting_since_ms.is_some());
+        ingest_at(
+            &mut r,
+            4500,
+            &[
+                0x73, 2, 6, 0x0C, 0, 1, 0, 0x73, 0xFE, 1, 3, 0x54, b'B', b'W', b'M',
+            ],
+        );
+        assert!(r.advance_scan(4600, &mut Vec::new()));
+        assert_eq!(r.current, Some(0x108));
+        assert!(!r.advance_scan(8700, &mut Vec::new()));
+        let (cfg, names) = r.take_scan_result().unwrap();
+        assert_eq!(cfg.panel.kind, telenot_config::PanelKind::Hiplex8400);
+        assert_eq!(r.config().panel.kind, telenot_config::PanelKind::Complex400);
+        assert!(!cfg.panel.hiplex_cmds_verified);
+        assert_eq!(cfg.sensors.len(), 2);
+        assert_eq!(names.len(), 1);
+        assert!(cfg
+            .sensors
+            .iter()
+            .all(|s| !s.confirmed() && !s.switchable()));
+        assert_eq!(
+            cfg.sensors
+                .iter()
+                .find(|s| s.address() == 0x108)
+                .unwrap()
+                .name(),
+            "Eingang 0108"
+        );
+
+        // Commit confirmed synthetic sensors and exercise the existing MQTT status path.
+        let sensors: Vec<_> = cfg
+            .sensors
+            .iter()
+            .map(|s| {
+                let mut owned = s.to_sensor();
+                owned.confirmed = true;
+                owned
+            })
+            .collect();
+        let mut cfg = cfg;
+        cfg.sensors = telenot_config::SensorTable::from_sensors(&sensors).unwrap();
+        let messages = crate::hadisco::discovery_messages(
+            &cfg,
+            &crate::hadisco::DiscoveryOpts::new("test/bridge"),
+        );
+        assert!(messages
+            .iter()
+            .any(|m| m.payload.contains("test/bridge/sensor/bwm/state")));
+        let mut core = Core::new(
+            Arc::new(cfg),
+            CoreOptions {
+                disarm_enabled: false,
+            },
+        );
+        for (now, bits, expected) in [(10, 0xFE, "ON"), (20, 0xFF, "OFF")] {
+            let frame = Frame::new(&[0x73, 2, 5, 0x24, 0, 1, 0, 1, bits]).unwrap();
+            assert!(core.on_frame(now, &frame).iter().any(|a| matches!(a,
+                Action::Publish {topic, payload, retain} if topic == "sensor/bwm/state" && payload == expected && *retain)));
+        }
+        assert!(core.on_tick(20 + telenot_core::SERIAL_DEADLINE_MS + 1).iter().any(|a| matches!(a,
+            Action::Publish {topic, payload, ..} if topic == "availability" && payload == "offline")));
+    }
+
+    #[test]
+    fn hiplex_missing_occupancy_stops_after_three_read_queries() {
+        let mut r = hiplex_scan();
+        assert!(r.advance_scan(5000, &mut Vec::new()));
+        assert!(r.advance_scan(10000, &mut Vec::new()));
+        assert!(!r.advance_scan(15000, &mut Vec::new()));
+        assert!(!r.scanning);
+        assert!(r.take_scan_result().is_none());
+    }
+
+    #[test]
+    fn hiplex_capture_probe_never_seeds_inventory_and_cancels() {
+        let mut r = rt();
+        // Reproduce S2 before commit: setup says hiplex, live core is still complex.
+        assert_eq!(r.config().panel.kind, telenot_config::PanelKind::Complex400);
+        r.start_capture_scan(0, telenot_config::PanelKind::Hiplex8400);
+        assert!(r.diagnostic_probe.is_some());
+        assert!(!r.scanning);
+        assert!(r
+            .feed(0, &bytes(SEND_NORM))
+            .iter()
+            .any(|a| matches!(a, Action::SendFrame(b) if b.len() == 15)));
+        assert!(r.snapshot().discovered.is_none());
+        assert!(r.take_scan_result().is_none());
+        r.apply_intent(100, Intent::CancelScan { keep_partial: true });
+        assert!(r.diagnostic_probe.is_none());
+        assert!(r.take_scan_result().is_none());
+        assert!(r
+            .feed(5_000, &bytes(SEND_NORM))
+            .iter()
+            .all(|a| !matches!(a, Action::SendFrame(b) if b.len() == 15)));
+        assert!(!r.config().panel.hiplex_cmds_verified);
+        assert_eq!(r.config().panel.kind, telenot_config::PanelKind::Complex400);
+        assert!(r.config().sensors.is_empty());
+    }
+
+    #[test]
+    fn normal_scans_and_complex_capture_keep_existing_discovery() {
+        let mut r = rt();
+        r.start_capture_scan(0, telenot_config::PanelKind::Complex400);
+        assert!(r.scanning);
+        assert!(r.diagnostic_probe.is_none());
+        let mut config = r.config().clone();
+        config.panel.kind = telenot_config::PanelKind::Hiplex8400;
+        r.reload(Arc::new(config), false);
+        r.start_capture_scan(1, telenot_config::PanelKind::Hiplex8400);
+        r.apply_intent(2, Intent::StartScan);
+        assert!(r.scanning);
+        assert!(r.diagnostic_probe.is_none());
+        r.feed(3, &bytes(SEND_NORM));
+        let actions = r.feed(5_000, &bytes(SEND_NORM));
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, Action::SendFrame(b) if b.len() == 15 && b[11] == 0x71)));
+    }
+
+    #[test]
+    fn complex_text_pairing_survives_interleaved_records() {
+        let mut r = rt();
+        r.apply_intent(0, Intent::StartScan);
+        // Real complex frames interleave records (0x50 date/time between 0x0C and 0x54,
+        // exactly like the documented alarm telegram). The frame-wide pairing must keep
+        // working — the strict hiplex adjacency rule must not leak into the complex scan.
+        let frame = Frame::new(&[
+            0x73, 2, //
+            6, 0x0C, 0, 0x01, 0x08, 0x73, 0xFE, 1, //
+            7, 0x50, 0x05, 0x14, 0x03, 0x08, 0x0A, 0x10, 0x32, //
+            3, 0x54, b'B', b'W', b'M',
+        ])
+        .unwrap();
+        r.ingest_discover(&frame, &mut Vec::new());
+        assert_eq!(r.discovery.named_count(), 1);
+        assert_eq!(
+            r.discovery.raw_names().get(&0x0108).map(String::as_str),
+            Some("BWM")
+        );
     }
 
     /// Raw frame with a single Fehler record (satztyp 0x11, payload `[geraet, code]`).

@@ -313,6 +313,11 @@ pub fn discovery_for_each(config: &Config, o: &DiscoveryOpts, emit: &mut dyn FnM
             "availability": avail,
             "device": dev,
         });
+        payload["availability"] = json!([
+            {"topic": format!("{}/availability", o.topic_root), "payload_available":"online", "payload_not_available":"offline"},
+            {"topic": format!("{}/sensor/{}/availability", o.topic_root, s.topic()), "payload_available":"online", "payload_not_available":"offline"}
+        ]);
+        payload["availability_mode"] = json!("all");
         if is_diagnostic(s.kind()) {
             payload["entity_category"] = json!("diagnostic");
         }
@@ -363,6 +368,50 @@ pub fn discovery_for_each(config: &Config, o: &DiscoveryOpts, emit: &mut dyn FnM
                 .to_string(),
                 retain: true,
             });
+        }
+    }
+}
+
+/// Retained HA discovery topics that must be CLEARED when switching from `old` to
+/// `new`: removed confirmed sensors (binary_sensor + their switch entity) and sensors
+/// whose `switchable` flag was withdrawn (switch entity only). The caller queues these
+/// for durable, retried delivery — a one-shot publish during a broker outage would
+/// leave orphaned entities in HA forever.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EntityDeletion {
+    pub address: u16,
+    pub switch: bool,
+}
+impl EntityDeletion {
+    pub fn topic(self) -> String {
+        let platform = if self.switch {
+            "switch"
+        } else {
+            "binary_sensor"
+        };
+        let suffix = if self.switch { "_switch" } else { "" };
+        format!(
+            "homeassistant/{platform}/{HA_ID}/{HA_ID}_{:04x}{suffix}/config",
+            self.address
+        )
+    }
+    pub fn still_present(self, config: &Config) -> bool {
+        config.sensors.iter().any(|s| {
+            s.address() == self.address && s.confirmed() && (!self.switch || s.switchable())
+        })
+    }
+}
+
+pub fn deletions_for_each(old: &Config, new: &Config, emit: &mut dyn FnMut(EntityDeletion)) {
+    for s in old.sensors.iter().filter(|s| s.confirmed()) {
+        for switch in [false, true] {
+            let deletion = EntityDeletion {
+                address: s.address(),
+                switch,
+            };
+            if (!switch || s.switchable()) && !deletion.still_present(new) {
+                emit(deletion);
+            }
         }
     }
 }
@@ -567,5 +616,39 @@ mod tests {
 
         // in controllable mode, NO read-only alarm-state sensor (no duplicate entity)
         assert!(!msgs.iter().any(|m| m.topic.contains("alarm_state")));
+    }
+
+    #[test]
+    fn deletion_topics_cover_removed_and_unswitched_sensors() {
+        let mk = |addr: u16, switchable: bool| telenot_config::Sensor {
+            address: addr,
+            name: "S".into(),
+            name_ha: "S".into(),
+            kind: telenot_config::SensorKind::Unbekannt,
+            topic: format!("s{addr:x}"),
+            polarity: telenot_config::Polarity::ActiveLow,
+            confirmed: true,
+            switchable,
+            show_in_homekit: false,
+        };
+        let cfg = |sensors: &[telenot_config::Sensor]| Config {
+            schema_version: telenot_config::CURRENT_SCHEMA_VERSION,
+            sensors: telenot_config::SensorTable::from_sensors(sensors).unwrap(),
+            panel: Default::default(),
+        };
+        // 0x10 removed (was switchable), 0x11 loses switchable, 0x12 unchanged.
+        let old = cfg(&[mk(0x10, true), mk(0x11, true), mk(0x12, false)]);
+        let new = cfg(&[mk(0x11, false), mk(0x12, false)]);
+        let mut topics = Vec::new();
+        deletions_for_each(&old, &new, &mut |d| topics.push(d.topic()));
+        assert_eq!(
+            topics,
+            vec![
+                "homeassistant/binary_sensor/telenot-bridge/telenot-bridge_0010/config".to_string(),
+                "homeassistant/switch/telenot-bridge/telenot-bridge_0010_switch/config".to_string(),
+                "homeassistant/switch/telenot-bridge/telenot-bridge_0011_switch/config".to_string(),
+            ]
+        );
+        deletions_for_each(&new, &new, &mut |_| panic!("unchanged entity"));
     }
 }

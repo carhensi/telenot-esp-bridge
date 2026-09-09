@@ -1,5 +1,13 @@
 # hiplex 8400H — Support-Roadmap (zweite Anlagen-Variante)
 
+> **Stand 2026-09: Lesebetrieb (GMS plus) ist als Beta in der Firmware** — Community-Beitrag
+> eines Testers mit realer 8400H, verifiziert per Mitschnitten und echtem Alarmtest:
+> Bereich 1 liest ab Basis **0x0500** (nicht 0x0530, wie aus der complex abgeleitet), das
+> Alarmbit speichert bis zum Rücksetzen, Discovery sammelt Eingangs-Belegtblöcke bis zur
+> Antwortpause (kein separater 0x72-Block). Offen: Befehlsadressen (Gate
+> `hiplex_cmds_verified` bleibt zu), GMS lite, weitere Bereiche, Bereit-Bits, andere
+> FW-Stände. Offline-Nachweis für Tester: `verify_hiplex_capture` (telenot-sim-Example).
+
 Additiv, kein Rewrite: Protokoll/Core/Config sind sauber getrennt — die Arbeit steckt im
 **Adress-/Topologie-Modell** und in der **Capture-Verifikation**. Engpass ist **H0** (echter
 Mitschnitt); ohne den ist alles Weitere Spekulation.

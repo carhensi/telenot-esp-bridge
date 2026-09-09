@@ -454,6 +454,10 @@ impl CaptureMode {
 /// separate [`FrameDecoder`] counts valid/invalid frames and record types in parallel — as a
 /// live trust indicator ("GMS data is arriving") without burdening the hot loop.
 pub struct CaptureState {
+    trace: Vec<u8>,
+    pub trace_full: bool,
+    /// Read plan selected at capture start, independent of the committed core profile.
+    pub hiplex_probe: bool,
     pub active: bool,
     pub mode: CaptureMode,
     /// Ring of the LAST `cap` received bytes (the decoder re-syncs itself during replay).
@@ -473,6 +477,9 @@ pub struct CaptureState {
 impl Default for CaptureState {
     fn default() -> Self {
         CaptureState {
+            trace: Vec::new(),
+            trace_full: false,
+            hiplex_probe: false,
             active: false,
             mode: CaptureMode::Listen,
             buf: Vec::new(),
@@ -493,6 +500,13 @@ impl Default for CaptureState {
 impl CaptureState {
     /// Starts a fresh capture in the given mode (discards any previous capture).
     pub fn start(&mut self, mode: CaptureMode, now: u64) {
+        self.trace.clear();
+        if self.trace.capacity() == 0 {
+            self.trace.reserve_exact(16 * 1024);
+        }
+        self.trace.extend_from_slice(b"GMSDIAG1");
+        self.trace_full = false;
+        self.hiplex_probe = false;
         self.active = true;
         self.mode = mode;
         self.buf.clear();
@@ -555,6 +569,46 @@ impl CaptureState {
         self.buf.clone()
     }
 
+    /// RX chunks retain transport boundaries; timestamps are relative to capture start.
+    pub fn record_rx(&mut self, now: u64, chunk: &[u8]) {
+        self.record(chunk);
+        self.trace_event(now, 0, chunk);
+    }
+
+    /// Record only read queries and ACKs, after the transport write returns.
+    /// Success means transport acceptance, not acknowledgement by the panel.
+    pub fn record_tx(&mut self, now: u64, frame: &[u8], success: bool) {
+        let query =
+            frame.len() == 15 && frame.starts_with(&[0x68, 9, 9, 0x68, 0x73, 0x02, 5, 0x10]);
+        if query || frame == telenot_protocol::CONF_ACK_FRAME {
+            self.trace_event(now, if success { 1 } else { 2 }, frame);
+        }
+    }
+
+    fn trace_event(&mut self, now: u64, direction: u8, bytes: &[u8]) {
+        if !self.active || self.trace_full || bytes.is_empty() {
+            return;
+        }
+        if bytes.len() > u16::MAX as usize || self.trace.len() + 11 + bytes.len() > 16 * 1024 {
+            self.trace_full = true;
+            return;
+        }
+        self.trace.push(direction);
+        self.trace
+            .extend_from_slice(&now.saturating_sub(self.started_ms).to_le_bytes());
+        self.trace
+            .extend_from_slice(&(bytes.len() as u16).to_le_bytes());
+        self.trace.extend_from_slice(bytes);
+    }
+
+    pub fn trace_bytes(&self) -> Vec<u8> {
+        self.trace.clone()
+    }
+
+    pub fn trace_used(&self) -> usize {
+        self.trace.len()
+    }
+
     pub fn buf_used(&self) -> usize {
         self.buf.len()
     }
@@ -610,6 +664,8 @@ impl SetupState {
 /// Complete HTTP-side state. Held behind `Arc<Mutex<App>>` by HTTP threads and the serial
 /// owner (briefly).
 pub struct App {
+    pub commit_status: crate::dto::CommitStatus,
+    pub pending_commit: Option<Arc<Config>>,
     pub device: DeviceInfo,
     pub setup: SetupState,
     /// Currently active/persisted config — the SAME `Arc` the core holds (steady state:
@@ -631,6 +687,10 @@ pub struct App {
     /// Actual MQTT connection state (mirrored from the sink). Replaces the plain "tested"
     /// flag in diagnostics.
     pub mqtt_connected: bool,
+    pub mqtt_publish_errors: u32,
+    pub mqtt_setup_pending: bool,
+    pub mqtt_reconnects: u32,
+    pub mqtt_discovery_count: usize,
     /// Firmware heap in bytes `(free, largest_free_block, low_watermark)`. `None` on the host.
     pub heap: Option<(u64, u64, u64)>,
     /// Reset reason of the last boot (esp_reset_reason, e.g. "poweron"/"panic"/"task_wdt").
@@ -664,6 +724,8 @@ pub struct App {
 impl App {
     pub fn new(device: DeviceInfo, services: Box<dyn Services>) -> Self {
         App {
+            commit_status: Default::default(),
+            pending_commit: None,
             device,
             setup: SetupState::default(),
             persisted: Arc::new(Config::default()),
@@ -679,6 +741,10 @@ impl App {
             session: None,
             csrf: None,
             mqtt_connected: false,
+            mqtt_publish_errors: 0,
+            mqtt_setup_pending: false,
+            mqtt_reconnects: 0,
+            mqtt_discovery_count: 0,
             heap: None,
             boot_reason: "unknown",
             boot_count: 0,
@@ -797,6 +863,28 @@ impl App {
         }
     }
 
+    /// Only the owner reports completion, after storage has accepted this exact config.
+    pub fn finish_commit(&mut self, cfg: &Arc<Config>, result: Result<(), String>) {
+        if !self
+            .pending_commit
+            .as_ref()
+            .is_some_and(|pending| Arc::ptr_eq(pending, cfg))
+        {
+            return;
+        }
+        self.pending_commit = None;
+        self.commit_status = match result {
+            Ok(()) => crate::dto::CommitStatus::Saved {
+                sensors: cfg.sensors.len(),
+            },
+            Err(message) => {
+                // Preserve the user's selection for export/retry after a failed write.
+                self.setup.seed_persisted((**cfg).clone());
+                crate::dto::CommitStatus::Failed { message }
+            }
+        };
+    }
+
     /// NON-consuming working config (export/HomeKit apply): builds a fresh table from
     /// the included session entries (one transient `Sensor` at a time). Fails with
     /// [`telenot_config::ConfigError::TooLarge`] if the inventory does not fit.
@@ -910,6 +998,57 @@ mod tests {
         assert!(!c.active);
         c.record(&frame); // no growth after stop
         assert_eq!(c.bytes_total, frame.len() as u64);
+    }
+
+    #[test]
+    fn capture_trace_preserves_direction_time_and_raw_rx() {
+        let mut c = CaptureState::default();
+        c.start(CaptureMode::Discover, 1_000);
+        c.record_rx(1_007, &[0x68, 0x02]);
+        let mut query = [0; 32];
+        let n = telenot_protocol::encode_belegt_query(&mut query).unwrap();
+        c.record_tx(1_009, &query[..n], true);
+        c.record_tx(1_010, &query[..n], false);
+        let mut expected = b"GMSDIAG1".to_vec();
+        for (direction, time, bytes) in [
+            (0, 7u64, &[0x68, 0x02][..]),
+            (1, 9u64, &query[..n]),
+            (2, 10u64, &query[..n]),
+        ] {
+            expected.push(direction);
+            expected.extend_from_slice(&time.to_le_bytes());
+            expected.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
+            expected.extend_from_slice(bytes);
+        }
+        assert_eq!(c.trace_bytes(), expected);
+        assert_eq!(c.bytes(), [0x68, 0x02]);
+        let n = telenot_protocol::encode_command_02(0x1234, 2, 0x61, &mut query).unwrap();
+        c.record_tx(1_011, &query[..n], true);
+        assert_eq!(c.trace_bytes(), expected, "commands are not traced");
+        c.stop(1_012);
+        c.record_rx(1_013, &[0x16]);
+        c.record_tx(1_014, &telenot_protocol::CONF_ACK_FRAME, true);
+        assert_eq!(c.trace_bytes(), expected, "stopped capture is immutable");
+    }
+
+    #[test]
+    fn capture_trace_keeps_complete_prefix_and_resets() {
+        let mut c = CaptureState::default();
+        c.start(CaptureMode::Listen, 0);
+        c.record_rx(1, &[0xAA; 100]);
+        let prefix = c.trace_bytes();
+        c.record_rx(2, &[0xBB; 16 * 1024]);
+        assert!(c.trace_full);
+        c.record_rx(3, &[0xCC]);
+        assert_eq!(
+            c.trace_bytes(),
+            prefix,
+            "no partial events or gaps after overflow"
+        );
+        assert!(c.bytes_total > 16 * 1024, "raw capture continues");
+        c.start(CaptureMode::Discover, 5);
+        assert!(!c.trace_full);
+        assert_eq!(c.trace_bytes(), b"GMSDIAG1");
     }
 
     #[test]

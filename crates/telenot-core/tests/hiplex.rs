@@ -262,3 +262,89 @@ fn schaltaktion_requires_known_base() {
         .iter()
         .any(|(t, pl)| t == "command_result" && pl.contains("Basisadresse unbekannt")));
 }
+
+fn plus_core() -> Core {
+    let mut cfg = Config::default();
+    cfg.panel.kind = PanelKind::Hiplex8400;
+    cfg.panel.gms_variant = telenot_config::GmsVariant::Plus;
+    Core::new(std::sync::Arc::new(cfg), CoreOptions::default())
+}
+
+#[test]
+fn plus_snapshot_sequence_latches_alarm_until_reset() {
+    let mut core = plus_core();
+    // Synthetic output blocks, independent of the provisional command constants.
+    // Disarm changes the mode bits but cannot clear a latched alarm bit.
+    let sequence = [
+        (0x9e, ArmState::Disarmed),
+        (0x9d, ArmState::ArmedHome),
+        (0xdd, ArmState::ArmedHome),
+        (0xde, ArmState::Disarmed),
+        (0x9b, ArmState::ArmedAway),
+        (0xf3, ArmState::Triggered),
+        (0xf6, ArmState::Triggered),
+        (0xfe, ArmState::Disarmed),
+    ];
+    for (i, (byte, expected)) in sequence.into_iter().enumerate() {
+        let frame = ndat(&record(satztyp::BLOCKSTATUS, &[0, 5, 0, 2, byte]));
+        let actions = core.on_frame(1000 + i as u64 * 1000, &frame);
+        assert_eq!(core.arm_state(), expected);
+        assert_eq!(core.area_states().len(), 1);
+        assert!(!actions
+            .iter()
+            .any(|a| matches!(a, Action::SendFrame(f) if f.len() > 8)));
+        assert!(!publishes(&actions)
+            .iter()
+            .any(|(t, _)| t.contains("ready") || t.starts_with("mb/")));
+    }
+    assert_eq!(
+        HIPLEX8400.addr_unscharf(1),
+        0x0530,
+        "read mapping must not rewrite commands"
+    );
+}
+
+#[test]
+fn plus_ignores_wrong_extensions_devices_and_old_assumptions() {
+    let mut core = plus_core();
+    for payload in [
+        &[0, 5, 0, 0x72, 0xfe][..],
+        &[1, 5, 0, 2, 0xfe],
+        &[0, 5, 0x30, 2, 0xfe],
+        &[0, 5, 0, 1, 0xfe],
+    ] {
+        core.on_frame(100, &ndat(&record(satztyp::BLOCKSTATUS, payload)));
+        assert_eq!(core.arm_state(), ArmState::Unknown);
+    }
+    for byte in [0xff, 0xfc] {
+        core.on_frame(
+            200,
+            &ndat(&record(satztyp::BLOCKSTATUS, &[0, 5, 0, 2, byte])),
+        );
+        assert_eq!(
+            core.arm_state(),
+            ArmState::Unknown,
+            "absent or contradictory mode bits"
+        );
+    }
+}
+
+#[test]
+fn plus_heartbeat_cannot_keep_old_area_status_alive_and_reconnect_is_current() {
+    let mut core = plus_core();
+    core.on_frame(
+        1000,
+        &ndat(&record(satztyp::BLOCKSTATUS, &[0, 5, 0, 2, 0xfe])),
+    );
+    core.on_frame(10000, &send_norm());
+    core.on_tick(10001);
+    assert_eq!(core.arm_state(), ArmState::Unknown);
+    let mut actions = Vec::new();
+    core.republish_for_each(&mut |a| actions.push(a));
+    assert!(publishes(&actions).contains(&("area/1/state".into(), "unknown".into())));
+    let actions = core.on_frame(
+        11000,
+        &ndat(&record(satztyp::BLOCKSTATUS, &[0, 5, 0, 2, 0xfd])),
+    );
+    assert!(publishes(&actions).contains(&("area/1/state".into(), "ARMED_HOME".into())));
+}

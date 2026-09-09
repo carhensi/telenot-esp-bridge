@@ -60,6 +60,12 @@ impl Discovery {
         self.got_inputs && self.got_outputs
     }
 
+    /// hiplex GMS plus answers the outputs query with the same inputs block — the
+    /// plus scan therefore only ever waits for inputs (see runtime::belegt_complete).
+    pub fn inputs_received(&self) -> bool {
+        self.got_inputs
+    }
+
     /// List of occupied addresses (the detection points to query).
     pub fn occupied(&self) -> Vec<u16> {
         self.occupied.iter().copied().collect()
@@ -136,6 +142,36 @@ impl Discovery {
     pub fn into_config_for(&self, profile: &PanelProfile, panel: &PanelSettings) -> Config {
         let mut cfg = self.into_config();
         cfg.panel = panel.clone();
+        if profile.kind == PanelKind::Hiplex8400 && panel.gms_variant == GmsVariant::Plus {
+            // GMS plus delivers Klartexte, but an input whose name query timed out would
+            // be dropped by the name filter in into_config(). Keep it with a generic
+            // placeholder name instead — the user renames it in the sensor setup step.
+            for &addr in &self.occupied {
+                if self.names.contains_key(&addr) {
+                    continue;
+                }
+                let name = format!("Eingang {addr:04X}");
+                let mut topic = format!("eingang_{addr:04x}");
+                while cfg.sensors.iter().any(|s| s.topic() == topic) {
+                    topic.push('_');
+                }
+                cfg.sensors
+                    .push(&Sensor {
+                        address: addr,
+                        name: name.clone(),
+                        name_ha: name,
+                        kind: SensorKind::Unbekannt,
+                        topic,
+                        polarity: Polarity::ActiveLow,
+                        confirmed: false,
+                        switchable: false,
+                        show_in_homekit: false,
+                    })
+                    // ingest_belegt caps `occupied` at MAX_SENSORS, so this cannot overflow
+                    // the table's device limits.
+                    .expect("bounded discovery inventory");
+            }
+        }
         if profile.kind == PanelKind::Hiplex8400 && panel.gms_variant == GmsVariant::Lite {
             let mb_range = profile.mb_status_base..profile.mb_status_base + profile.mb_max;
             let known: BTreeSet<u16> = cfg.sensors.iter().map(|s| s.address()).collect();

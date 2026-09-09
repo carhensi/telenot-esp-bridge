@@ -211,7 +211,8 @@ pub fn dispatch(app: &mut App, req: &ApiRequest) -> ApiResponse {
         (Method::Get, ["connection", "check"]) => sensors::handle_connection_check_status(app),
 
         (Method::Post, ["scan", "start"]) => {
-            app.intents.push(Intent::StartScan);
+            app.intents
+                .push(Intent::StartScanFor(app.setup.panel.clone()));
             ok_json(202, &serde_json::json!({"phase":"belegt"}))
         }
         (Method::Post, ["scan", "cancel"]) => sensors::handle_scan_cancel(app, req),
@@ -224,21 +225,33 @@ pub fn dispatch(app: &mut App, req: &ApiRequest) -> ApiResponse {
         },
         // Apply pending HomeKit detector set LIVE: persist config (no reboot) and signal
         // the HAP thread to reconcile the accessory set. Session/CSRF-gated (POST).
-        (Method::Post, ["homekit", "apply"]) => match app.working_config() {
-            Ok(cfg) => {
-                app.intents
-                    .push(Intent::ReloadConfig(std::sync::Arc::new(cfg)));
+        (Method::Post, ["homekit", "apply"]) => {
+            let response = sensors::handle_commit(
+                app,
+                &ApiRequest {
+                    body: br#"{"warnings_acknowledged":true}"#.to_vec(),
+                    ..req.clone()
+                },
+            );
+            if response.status == 202 {
                 app.intents.push(Intent::ApplyHomekit);
-                ApiResponse::empty(204)
             }
-            Err(_) => err(
-                500,
-                "config_too_large",
-                "Konfiguration zu groß für den Gerätespeicher",
-            ),
-        },
+            response
+        }
         // Reboot the device (picks up an MQTT↔HomeKit mode switch).
         (Method::Post, ["reboot"]) => {
+            if app.pending_commit.is_some()
+                || matches!(app.commit_status, crate::dto::CommitStatus::Failed { .. })
+            {
+                return err(
+                    409,
+                    "commit_not_saved",
+                    "Konfiguration noch nicht erfolgreich gespeichert. Kein Neustart.",
+                );
+            }
+            if app.setup.session.is_some() {
+                return err(409, "unsaved_sensors", "Melderauswahl noch nicht übernommen. Bitte im letzten Setup-Schritt speichern.");
+            }
             app.intents.push(Intent::Reboot);
             ApiResponse::empty(204)
         }
@@ -281,11 +294,15 @@ pub fn dispatch(app: &mut App, req: &ApiRequest) -> ApiResponse {
         }
         (Method::Get, ["debug", "capture"]) => diagnostics::handle_capture_status(app),
         (Method::Get, ["debug", "capture.bin"]) => ApiResponse::binary(200, app.capture.bytes()),
+        (Method::Get, ["debug", "capture.trace"]) => {
+            ApiResponse::binary(200, app.capture.trace_bytes())
+        }
 
         (Method::Get, ["state"]) => diagnostics::handle_state(app),
 
         (Method::Get, ["review"]) => sensors::handle_review(app),
         (Method::Post, ["commit"]) => sensors::handle_commit(app, req),
+        (Method::Get, ["commit"]) => ok_json(200, &app.commit_status),
 
         // Settings backup: export/import as JSON (migration safety net, e.g. before
         // repartitioning for OTA). Intentionally excludes secrets.

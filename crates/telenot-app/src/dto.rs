@@ -339,6 +339,9 @@ pub struct SerialDiag {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MqttDiag {
+    pub setup_pending: bool,
+    pub publish_errors: u32,
+    pub discovery_count: usize,
     pub status: String,
     pub reconnects: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -406,6 +409,9 @@ pub struct RecTypeCount {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CaptureStatusDto {
+    pub hiplex_probe: bool,
+    pub trace_used: usize,
+    pub trace_full: bool,
     pub active: bool,
     /// "listen" | "listen_ack" | "discover".
     pub mode: String,
@@ -485,6 +491,24 @@ pub struct ReviewDto {
 pub struct CommitReq {
     #[serde(default)]
     pub warnings_acknowledged: bool,
+    #[serde(default)]
+    pub expected_sensors: Option<usize>,
+    #[serde(default)]
+    pub expected_confirmed: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CommitStatus {
+    #[default]
+    Idle,
+    Pending,
+    Saved {
+        sensors: usize,
+    },
+    Failed {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]

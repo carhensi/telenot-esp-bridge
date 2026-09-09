@@ -448,8 +448,8 @@ fn security_and_commit_flow() {
             Some(&csrf),
         ),
     );
-    assert_eq!(r.status, 200);
-    assert_eq!(jval(&r)["rebooting"], true);
+    assert_eq!(r.status, 202);
+    assert_eq!(jval(&r)["rebooting"], false);
     assert!(app
         .intents
         .iter()
@@ -807,7 +807,7 @@ fn logout_invalidates_session() {
 }
 
 #[test]
-fn bulk_ops_update_known_and_skip_unknown() {
+fn bulk_ops_reject_unknown_without_partial_changes() {
     let mut app = app();
     let (token, csrf) = login(&mut app);
     seed(&mut app); // 0x0042 (unconfirmed) + 0x0050 (confirmed)
@@ -823,14 +823,20 @@ fn bulk_ops_update_known_and_skip_unknown() {
             Some(&csrf),
         ),
     );
+    assert_eq!(r.status, 409);
+    assert_eq!(app.sensor_counts().confirmed, 1, "no partial confirmation");
+    let r = dispatch(
+        &mut app,
+        &req(
+            Method::Post,
+            "/api/v1/sensors/bulk",
+            json!({"addresses":[0x0042,0x0050],"op":"confirm"}),
+            Some(&token),
+            Some(&csrf),
+        ),
+    );
     assert_eq!(r.status, 200);
-    assert_eq!(jval(&r)["updated"], 2, "only known addresses count");
-    let v = get_sensors(&mut app, &token, "");
-    assert!(v["sensors"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|s| s["confirmed"] == true));
+    assert_eq!(jval(&r)["updated"], 2);
 
     // Exclude/include round-trip via status field.
     let r = dispatch(
@@ -1064,4 +1070,134 @@ fn backup_requires_session() {
         &req(Method::Get, "/api/v1/backup", Value::Null, None, None),
     );
     assert_eq!(r.status, 401, "export requires a session");
+}
+
+#[test]
+fn commit_waits_for_storage_rejects_double_submit_and_preserves_failed_selection() {
+    let mut app = app();
+    let (token, csrf) = login(&mut app);
+    seed_many(&mut app, 7);
+    let early_reboot = req(
+        Method::Post,
+        "/api/v1/reboot",
+        Value::Null,
+        Some(&token),
+        Some(&csrf),
+    );
+    assert_eq!(
+        dispatch(&mut app, &early_reboot).status,
+        409,
+        "MQTT shortcut must not discard unsaved sensors"
+    );
+    let post = req(
+        Method::Post,
+        "/api/v1/commit",
+        json!({
+            "warnings_acknowledged": true, "expected_sensors": 7, "expected_confirmed": 7
+        }),
+        Some(&token),
+        Some(&csrf),
+    );
+    assert_eq!(dispatch(&mut app, &post).status, 202);
+    assert_eq!(
+        dispatch(&mut app, &post).status,
+        409,
+        "second commit must not save old empty inventory"
+    );
+    let reboot = req(
+        Method::Post,
+        "/api/v1/reboot",
+        Value::Null,
+        Some(&token),
+        Some(&csrf),
+    );
+    assert_eq!(dispatch(&mut app, &reboot).status, 409);
+    let cfg = app.pending_commit.clone().unwrap();
+    assert_eq!(cfg.sensors.len(), 7);
+    app.finish_commit(&cfg, Err("synthetic storage failure".into()));
+    assert_eq!(
+        app.sensor_counts().confirmed,
+        7,
+        "failed selection remains exportable"
+    );
+    assert_eq!(
+        dispatch(&mut app, &reboot).status,
+        409,
+        "failure must not reboot away the evidence"
+    );
+    let status = req(
+        Method::Get,
+        "/api/v1/commit",
+        Value::Null,
+        Some(&token),
+        None,
+    );
+    assert_eq!(jval(&dispatch(&mut app, &status))["state"], "failed");
+    assert_eq!(dispatch(&mut app, &post).status, 202);
+    let cfg = app.pending_commit.clone().unwrap();
+    app.persisted = cfg.clone();
+    app.finish_commit(&cfg, Ok(()));
+    assert_eq!(jval(&dispatch(&mut app, &status))["sensors"], 7);
+    assert_eq!(dispatch(&mut app, &reboot).status, 204);
+    let restored = Config::from_json(cfg.to_json().unwrap().as_bytes()).unwrap();
+    assert_eq!(restored.sensors.iter().filter(|s| s.confirmed()).count(), 7);
+}
+
+#[test]
+fn stale_browser_inventory_cannot_commit_empty_device_config() {
+    let mut app = app();
+    let (token, csrf) = login(&mut app);
+    let r = dispatch(
+        &mut app,
+        &req(
+            Method::Post,
+            "/api/v1/commit",
+            json!({"warnings_acknowledged":true,"expected_sensors":7,"expected_confirmed":7}),
+            Some(&token),
+            Some(&csrf),
+        ),
+    );
+    assert_eq!(r.status, 409);
+    assert_eq!(jval(&r)["error"]["code"], "inventory_changed");
+    assert!(app.intents.is_empty());
+}
+
+#[test]
+fn homekit_apply_consumes_session_and_reboot_waits_for_storage() {
+    let mut a = app();
+    let (session, csrf) = login(&mut a);
+    a.edit();
+    let call = |a: &mut App, path: &str| {
+        dispatch(
+            a,
+            &req(Method::Post, path, json!({}), Some(&session), Some(&csrf)),
+        )
+    };
+    assert_eq!(call(&mut a, "/api/v1/homekit/apply").status, 202);
+    assert!(a.setup.session.is_none());
+    assert_eq!(call(&mut a, "/api/v1/reboot").status, 409);
+    let cfg = a.pending_commit.clone().unwrap();
+    a.persisted = cfg.clone();
+    a.finish_commit(&cfg, Ok(()));
+    assert_eq!(call(&mut a, "/api/v1/reboot").status, 204);
+}
+
+#[test]
+fn failed_homekit_apply_restores_edits_and_blocks_reboot() {
+    let mut a = app();
+    let (session, csrf) = login(&mut a);
+    a.edit();
+    let call = |a: &mut App, path: &str| {
+        dispatch(
+            a,
+            &req(Method::Post, path, json!({}), Some(&session), Some(&csrf)),
+        )
+    };
+    assert_eq!(call(&mut a, "/api/v1/homekit/apply").status, 202);
+    assert_eq!(call(&mut a, "/api/v1/homekit/apply").status, 409);
+    let cfg = a.pending_commit.clone().unwrap();
+    a.finish_commit(&cfg, Err("NVS voll".into()));
+    assert!(a.setup.session.is_some());
+    assert_eq!(call(&mut a, "/api/v1/reboot").status, 409);
+    assert_eq!(call(&mut a, "/api/v1/homekit/apply").status, 202);
 }

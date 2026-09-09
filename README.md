@@ -45,10 +45,21 @@ Die Bridge ist bewusst auf das „GMS-lite-ähnliche" Wohnhaus-Szenario zugeschn
 (Kontakt/Bewegung/Rauch/Wasser), Monitoring + scharf/unscharf über HomeKit und MQTT.
 Dafür ist die GMS-Abdeckung vollständig ([GMS-Coverage](docs/GMS-COVERAGE.md)).
 
+**Beta**:
+
+- **Telenot hiplex 8400 (GMS plus): Lesebetrieb** — Bereich-1-Zustand inkl.
+  Alarmspeicher, Melder-Discovery mit Klartextnamen, Melder-Status. Verifiziert
+  auf einer realen 8400H (Community-Beitrag: Mitschnitte + echter Alarmtest
+  eines Testers mit eigener Anlage). Steuerbefehle (scharf/unscharf/rücksetzen)
+  bleiben hinter dem Freigabe-Gate `hiplex_cmds_verified` deaktiviert, bis die
+  Befehlsadressen am Gerät verifiziert sind; GMS lite bleibt provisorisch.
+  Details + Verify-Runner für weitere Tester: [hiplex-Roadmap](docs/hiplex.md),
+  `cargo run -p telenot-sim --example verify_hiplex_capture -- <capture>`.
+
 **Nicht unterstützt** (Roadmap, bewusst nicht halb eingebaut):
 
 - Sicherungsbereiche 2–8 (Multi-Bereich) → [GMS-Coverage](docs/GMS-COVERAGE.md)
-- Telenot hiplex 8400H → [hiplex-Roadmap](docs/hiplex.md)
+- hiplex-Steuerbefehle + GMS lite → [hiplex-Roadmap](docs/hiplex.md)
 
 ## Architektur
 
@@ -204,7 +215,7 @@ Klartext für den Einbau ins eigene Haus:
 | [GMS-COVERAGE](docs/GMS-COVERAGE.md) | Protokoll-Abdeckung + Roadmap |
 | [DEBUG-CAPTURE](docs/DEBUG-CAPTURE.md) | GMS-Mitschnitt fremder Anlagen (für Tester/Support) |
 | [AGENTS](AGENTS.md) | Architektur-Invarianten + Konventionen für Mitwirkende/Agenten |
-| [hiplex](docs/hiplex.md) | Roadmap: hiplex 8400H |
+| [hiplex](docs/hiplex.md) | hiplex 8400: Lesebetrieb Beta, Roadmap Befehle/GMS lite |
 
 Ground Truth sind reale Mitschnitte der laufenden Anlage (pcap plus 198 Befehls-Telegramme
 der Vorgänger-Bridge); Framing und Satzformat folgen den publizierten Standards

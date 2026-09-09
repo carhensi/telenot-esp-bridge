@@ -213,9 +213,7 @@ impl Services for NvsServices {
 
     fn set_password(&mut self, new: &str) -> Result<(), String> {
         let h = hash_secret(new)?;
-        self.nvs
-            .set_str(K_PW_HASH, &h)
-            .map_err(|e| e.to_string())?;
+        self.nvs.set_str(K_PW_HASH, &h).map_err(|e| e.to_string())?;
         self.nvs
             .set_u32(K_PW_CHANGED, 1)
             .map_err(|e| e.to_string())?;
@@ -295,7 +293,7 @@ fn get_str(nvs: &EspDefaultNvs, key: &str) -> Option<String> {
 /// Thin [`chunked::BlobStore`] adapter over `EspNvs`. All `EspNvs` blob methods take
 /// `&self`, so holding a shared reference is sufficient even for the `&mut self`
 /// trait methods.
-struct NvsBlobStore<'a, P: NvsPartitionId>(&'a EspNvs<P>);
+pub(crate) struct NvsBlobStore<'a, P: NvsPartitionId>(pub(crate) &'a EspNvs<P>);
 
 impl<P: NvsPartitionId> BlobStore for NvsBlobStore<'_, P> {
     fn blob_len(&self, key: &str) -> Result<Option<usize>, StoreError> {
@@ -314,7 +312,19 @@ impl<P: NvsPartitionId> BlobStore for NvsBlobStore<'_, P> {
     fn set_blob(&mut self, key: &str, val: &[u8]) -> Result<(), StoreError> {
         self.0
             .set_blob(key, val)
-            .map_err(|e| StoreError(format!("set_blob({key}): {e}")))
+            .map_err(|e| StoreError(format!("set_blob({key}): {e}")))?;
+        // Verify each bounded blob before acknowledging the save, including the meta commit.
+        let mut readback = vec![0; val.len()];
+        let stored = self
+            .0
+            .get_blob(key, &mut readback)
+            .map_err(|e| StoreError(format!("readback({key}): {e}")))?;
+        if stored != Some(val) {
+            return Err(StoreError(format!(
+                "Readback-Pruefung fehlgeschlagen: {key}"
+            )));
+        }
+        Ok(())
     }
 
     fn remove(&mut self, key: &str) -> Result<(), StoreError> {

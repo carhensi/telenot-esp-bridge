@@ -18,9 +18,11 @@
 pub mod api;
 pub mod app;
 pub mod command;
+mod diagnostic_probe;
 pub mod dto;
 pub mod dup;
 pub mod hadisco;
+pub mod http_policy;
 pub mod inventory;
 pub mod mqtt;
 pub mod ota;
@@ -139,3 +141,5 @@ impl ApiResponse {
         }
     }
 }
+
+pub mod deletions;

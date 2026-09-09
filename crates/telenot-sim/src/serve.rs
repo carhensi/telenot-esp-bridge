@@ -817,7 +817,20 @@ fn ema_loop(
                 }
                 Intent::ReloadConfig(cfg) => {
                     if let Some(p) = &config_path {
-                        let _ = std::fs::write(p, cfg.to_json().unwrap_or_default());
+                        let result = cfg
+                            .to_json()
+                            .map_err(|e| e.to_string())
+                            .and_then(|json| std::fs::write(p, json).map_err(|e| e.to_string()));
+                        if let Err(e) = result {
+                            app.lock().unwrap().finish_commit(&cfg, Err(e.clone()));
+                            push_log(
+                                &app,
+                                now,
+                                "error",
+                                &format!("Config speichern fehlgeschlagen: {e}"),
+                            );
+                            continue;
+                        }
                     }
                     // After commit the device is considered configured → a reload lands on the
                     // dashboard (mirrors real firmware, which goes live immediately after reboot).
@@ -826,6 +839,7 @@ fn ema_loop(
                         a.device.configured = true;
                         // App and core share the Arc (one sensor table in steady state).
                         a.persisted = Arc::clone(&cfg);
+                        a.finish_commit(&cfg, Ok(()));
                     }
                     push_log(&app, now, "info", "Konfiguration gespeichert & neu geladen");
                     // Symmetric to connect: always refresh inventory (path-B consumers,
@@ -884,7 +898,14 @@ fn ema_loop(
                     });
                 }
                 Intent::CaptureStart { mode } => {
-                    app.lock().unwrap().capture.start(mode, now);
+                    let panel_kind = {
+                        let mut a = app.lock().unwrap();
+                        let panel_kind = a.setup.panel.kind;
+                        a.capture.start(mode, now);
+                        a.capture.hiplex_probe = mode == telenot_app::app::CaptureMode::Discover
+                            && panel_kind == telenot_config::PanelKind::Hiplex8400;
+                        panel_kind
+                    };
                     push_log(
                         &app,
                         now,
@@ -893,7 +914,7 @@ fn ema_loop(
                     );
                     // Discover also runs the occupancy/text scan (read-only queries).
                     if mode == telenot_app::app::CaptureMode::Discover {
-                        runtime.apply_intent(now, Intent::StartScan);
+                        runtime.start_capture_scan(now, panel_kind);
                     }
                 }
                 Intent::CaptureStop => {
@@ -951,7 +972,7 @@ fn ema_loop(
                 // transmissions to the (foreign) panel.
                 {
                     let mut a = app.lock().unwrap();
-                    a.capture.record(&chunk);
+                    a.capture.record_rx(now, &chunk);
                     if a.capture.active && a.capture.mode.suppresses_tx() {
                         actions.retain(|act| !matches!(act, Action::SendFrame(_)));
                     }
@@ -1018,7 +1039,11 @@ fn apply_actions(
     for a in actions {
         match a {
             Action::SendFrame(bytes) => {
-                let _ = transport.write_frame(&bytes);
+                let result = transport.write_frame(&bytes);
+                app.lock()
+                    .unwrap()
+                    .capture
+                    .record_tx(now, &bytes, result.is_ok());
             }
             Action::Publish {
                 topic,

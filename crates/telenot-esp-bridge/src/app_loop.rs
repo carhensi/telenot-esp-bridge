@@ -21,7 +21,6 @@ use telenot_app::mqtt::MqttSink;
 use telenot_app::{
     authorize_command, homekit_authorized, App, CommandAuth, Intent, MqttSettings, Runtime,
 };
-use telenot_config::Config;
 use telenot_core::Action;
 
 use crate::mqtt::EspMqttSink;
@@ -114,7 +113,13 @@ pub fn run(
     // MQTT sink: starts log-only (unconfigured) and is (re)connected when settings change.
     let root0 = app.lock().unwrap().setup.mqtt.topic_root.clone();
     let mut sink = EspMqttSink::disconnected(root0);
+    let mut deletions =
+        telenot_app::deletions::Deletions::load(&crate::storage::NvsBlobStore(&nvs));
+    if let Err(e) = &deletions {
+        log::error!("HA-Löschjournal: {e}");
+    }
     let mut applied_mqtt: Option<MqttSettings> = None;
+    let mut next_mqtt_connect_at = 0;
     let mut online_announced = false;
     let mut last_diag_ms: u64 = 0;
     // Retained-chunk bookkeeping: how many `inventory/chunk/<i>` topics the LAST publish
@@ -198,7 +203,7 @@ pub fn run(
 
         // (Re)subscribe the MQTT command topics once the client is actually connected (the event
         // pump only signals; subscribing from the pump thread deadlocks the esp-idf-svc client).
-        sink.poll_resubscribe();
+        let mqtt_reconnected = sink.poll_resubscribe();
 
         // 1. Drain intents + read current setup state (hold lock only briefly).
         let (intents, conn, mqtt, remote, pin_set): (
@@ -311,7 +316,8 @@ pub fn run(
         // Settings change: ALWAYS persist (including HomeKit mode / empty host — otherwise the
         // HomeKit toggle doesn't survive a power cycle). Reconnect MQTT only in MQTT mode with
         // a host set.
-        if applied_mqtt.as_ref() != Some(&mqtt) {
+        if applied_mqtt.as_ref() != Some(&mqtt) && now >= next_mqtt_connect_at {
+            let mut applied = true;
             crate::storage::save_mqtt(&nvs, &mqtt);
             if !homekit_mode && !mqtt.host.is_empty() {
                 let pw = app.lock().unwrap().services.mqtt_password();
@@ -327,21 +333,19 @@ pub fn run(
                 ) {
                     Ok(s) => {
                         sink = s;
-                        publish_setup(
-                            &mut sink,
-                            &mqtt,
-                            runtime.config(),
-                            &mut last_inventory_chunks,
-                        );
+                        sink.request_setup();
+
                         online_announced = false;
                         let t = crate::storage::now_ms();
                         app.lock().unwrap().ring.push(
                             t,
                             "info",
-                            format!("MQTT verbunden: {}:{}", mqtt.host, mqtt.port),
+                            format!("MQTT-Client gestartet: {}:{}", mqtt.host, mqtt.port),
                         );
                     }
                     Err(e) => {
+                        applied = false;
+                        next_mqtt_connect_at = now.saturating_add(30_000);
                         log::error!("MQTT-Connect fehlgeschlagen: {e}");
                         let t = crate::storage::now_ms();
                         app.lock().unwrap().ring.push(
@@ -352,17 +356,60 @@ pub fn run(
                     }
                 }
             }
-            applied_mqtt = Some(mqtt.clone());
+            if applied {
+                applied_mqtt = Some(mqtt.clone());
+                next_mqtt_connect_at = 0;
+            }
         }
 
+        if mqtt_reconnected {
+            app.lock().unwrap().ring.push(
+                now,
+                "info",
+                "MQTT verbunden: Broker hat Verbindung bestaetigt".into(),
+            );
+        }
+        if mqtt_reconnected || sink.retry_due(now) {
+            sink.request_setup();
+
+            online_announced = false;
+        }
+        if let Ok(journal) = &mut deletions {
+            if let Some(entry) = journal.first() {
+                // A failed/interrupted config write may leave an intent for a live entity.
+                if (entry.still_present(runtime.config()) && !sink.deletion_in_flight())
+                    || sink.deletion_delivered()
+                {
+                    if journal
+                        .complete(&mut crate::storage::NvsBlobStore(&nvs))
+                        .is_ok()
+                    {
+                        sink.reset_deletion();
+                        sink.request_setup();
+                    }
+                } else {
+                    sink.send_deletion(&entry.topic());
+                }
+            }
+        }
+        if sink.setup_ready() && deletions.as_ref().is_ok_and(|j| j.first().is_none()) {
+            publish_setup(&mut sink, &mqtt, &runtime, &mut last_inventory_chunks);
+        }
         for intent in intents {
             match intent {
                 Intent::CaptureStart { mode } => {
-                    app.lock().unwrap().capture.start(mode, now);
+                    let panel_kind = {
+                        let mut a = app.lock().unwrap();
+                        let panel_kind = a.setup.panel.kind;
+                        a.capture.start(mode, now);
+                        a.capture.hiplex_probe = mode == telenot_app::app::CaptureMode::Discover
+                            && panel_kind == telenot_config::PanelKind::Hiplex8400;
+                        panel_kind
+                    };
                     log::info!("Debug-Capture: {}", mode.sends_desc());
                     // Discover also runs the occupied/text scan (read-only queries).
                     if mode == telenot_app::app::CaptureMode::Discover {
-                        runtime.apply_intent(now, Intent::StartScan);
+                        runtime.start_capture_scan(now, panel_kind);
                     }
                 }
                 Intent::CaptureStop => {
@@ -399,7 +446,7 @@ pub fn run(
                     match decision {
                         CommandAuth::Allow => {
                             let acts = runtime.on_command(now, cmd);
-                            apply_actions(acts, transport.as_mut(), &mut sink, &nvs);
+                            apply_actions(acts, transport.as_mut(), &mut sink, &nvs, &app);
                         }
                         CommandAuth::Deny(reason) => {
                             // Visible in the live test board (GET /state), not just the log.
@@ -408,13 +455,28 @@ pub fn run(
                         }
                     }
                 }
-                Intent::ReloadConfig(cfg) => match cfg_store.save(&cfg) {
+                Intent::ReloadConfig(cfg) => match deletions
+                    .as_mut()
+                    .map_err(|e| e.to_string())
+                    .and_then(|journal| {
+                        journal
+                            .prepare(
+                                runtime.config(),
+                                &cfg,
+                                &mut crate::storage::NvsBlobStore(&nvs),
+                            )
+                            .map_err(|e| e.to_string())
+                    })
+                    .and_then(|()| cfg_store.save(&cfg))
+                {
                     Err(e) => {
                         // Fail-closed: do NOT apply — otherwise it looks saved but is gone
                         // after a reboot (this is exactly how a config was already lost here).
                         // Visible in the diagnostics log, not only on serial.
                         log::error!("Config speichern: {e} — Änderungen NICHT übernommen");
                         let mut a = app.lock().unwrap();
+                        let _ = nvs.set_str("cfg_error", &e.chars().take(180).collect::<String>());
+                        a.finish_commit(&cfg, Err(e.clone()));
                         a.ring.push(
                             now,
                             "error",
@@ -430,6 +492,8 @@ pub fn run(
                             a.device.configured = !cfg.sensors.is_empty();
                             // Steady state holds ONE sensor table: app and core share the Arc.
                             a.persisted = std::sync::Arc::clone(&cfg);
+                            let _ = nvs.remove("cfg_error");
+                            a.finish_commit(&cfg, Ok(()));
                             // The commit dialog answers BEFORE this write — the ring is the
                             // only place the user can verify the config really hit flash.
                             a.ring.push(
@@ -451,17 +515,10 @@ pub fn run(
                                 );
                             }
                         }
-                        // Config lives only in the core afterwards (runtime.config() borrows it) —
-                        // a third copy in the loop was part of the boot OOM.
                         runtime.reload(cfg, telenot_app::security::disarm_enabled(remote, pin_set));
                         // Align discovery/inventory with the new config (retained).
                         if sink.is_connected() {
-                            publish_setup(
-                                &mut sink,
-                                &mqtt,
-                                runtime.config(),
-                                &mut last_inventory_chunks,
-                            );
+                            sink.request_setup();
                         }
                         log::info!("Config neu geladen + persistiert");
                     }
@@ -523,11 +580,15 @@ pub fn run(
                     // are free — the core remains additionally pre-arm-gated.
                     let allow = {
                         let a = app.lock().unwrap();
-                        homekit_authorized(cmd, a.setup.mqtt.homekit_mode, a.setup.mqtt.homekit_disarm)
+                        homekit_authorized(
+                            cmd,
+                            a.setup.mqtt.homekit_mode,
+                            a.setup.mqtt.homekit_disarm,
+                        )
                     };
                     if allow {
                         let acts = runtime.on_command(now, cmd);
-                        apply_actions(acts, transport.as_mut(), &mut sink, &nvs);
+                        apply_actions(acts, transport.as_mut(), &mut sink, &nvs, &app);
                     } else {
                         log::warn!("HomeKit-Befehl abgelehnt: Unscharf nicht freigegeben");
                     }
@@ -553,7 +614,12 @@ pub fn run(
                         log::info!("Setup-Fenster per Web aufgefrischt (gedeckelt)");
                     }
                 }
-                Intent::ApplyHomekit => {
+                Intent::ApplyHomekit
+                    if matches!(
+                        app.lock().unwrap().commit_status,
+                        telenot_app::dto::CommitStatus::Saved { .. }
+                    ) =>
+                {
                     // Stage → apply (without reboot): ensure HAP is idempotently running and
                     // signal the HAP thread to reconcile the bridged accessory set against the
                     // (just persisted) config. The reconcile itself runs in the HAP thread.
@@ -572,16 +638,16 @@ pub fn run(
                 // transmission to the (external) panel.
                 {
                     let mut a = app.lock().unwrap();
-                    a.capture.record(&chunk);
+                    a.capture.record_rx(now_ms(), &chunk);
                     if a.capture.active && a.capture.mode.suppresses_tx() {
                         acts.retain(|act| !matches!(act, Action::SendFrame(_)));
                     }
                 }
-                apply_actions(acts, transport.as_mut(), &mut sink, &nvs);
+                apply_actions(acts, transport.as_mut(), &mut sink, &nvs, &app);
             }
             Ok(Some(_)) => {
                 let acts = runtime.tick(now);
-                apply_actions(acts, transport.as_mut(), &mut sink, &nvs);
+                apply_actions(acts, transport.as_mut(), &mut sink, &nvs, &app);
             }
             Ok(None) => {
                 log::warn!("Panel-Transport geschlossen (EOF) — beende Loop-Iteration, warte");
@@ -598,6 +664,15 @@ pub fn run(
             let mut a = app.lock().unwrap();
             a.live = runtime.snapshot();
             a.mqtt_connected = sink.is_connected();
+            a.mqtt_publish_errors = sink.publish_errors;
+            a.mqtt_reconnects = sink.reconnects();
+            a.mqtt_setup_pending = sink.setup_pending();
+            a.mqtt_discovery_count = runtime
+                .config()
+                .sensors
+                .iter()
+                .filter(|s| s.confirmed())
+                .count();
             let stats = heap_stats();
             a.heap = Some(stats);
             // Heap warning threshold (latch, once per boot): low-water mark < 40 KB or largest
@@ -672,27 +747,49 @@ pub fn run(
 fn publish_setup(
     sink: &mut EspMqttSink,
     m: &MqttSettings,
-    config: &Config,
+    runtime: &Runtime,
     last_inventory_chunks: &mut usize,
 ) {
+    let config = runtime.config();
+    sink.begin_setup_pass();
+    let mut index = 0;
     if m.ha_discovery {
+        if config.panel.kind == telenot_config::PanelKind::Hiplex8400
+            && config.panel.gms_variant == telenot_config::GmsVariant::Plus
+        {
+            // Remove the legacy complex-only entities after switching panel profiles.
+            for (platform, suffix) in [
+                ("alarm_control_panel", "alarm"),
+                ("binary_sensor", "ready_intern"),
+                ("binary_sensor", "ready_extern"),
+            ] {
+                sink.setup_publish(
+                    &mut index,
+                    &format!(
+                        "homeassistant/{platform}/{0}/{0}_{suffix}/config",
+                        telenot_app::hadisco::HA_ID
+                    ),
+                    "",
+                    true,
+                    false,
+                );
+            }
+        }
         let mut opts = telenot_app::DiscoveryOpts::new(m.topic_root.clone());
+        opts.sw_version = env!("CARGO_PKG_VERSION").into();
         opts.controllable = true; // controllable alarm_control_panel; command path is fail-closed
         opts.areas = telenot_app::areas_from_config(config); // hiplex: per-area entities
                                                              // STREAM, never collect: all ~150 discovery strings at once (~120 KB) caused
                                                              // an OOM loop at boot with a full config.
-        let mut n = 0usize;
         telenot_app::discovery_for_each(config, &opts, &mut |msg| {
-            sink.publish_raw(&msg.topic, &msg.payload, msg.retain);
-            n += 1;
+            sink.setup_publish(&mut index, &msg.topic, &msg.payload, msg.retain, false);
         });
-        log::info!("HA-Discovery: {n} Entities (retained)");
     }
     // STREAM the inventory too: above the threshold each chunk string is built, published,
     // dropped — the single ~112 KB string at 500 sensors would hit the heap wall.
     let mut chunks = 0usize;
     telenot_app::inventory_for_each(config, &mut |topic, payload| {
-        sink.publish(topic, payload, true);
+        sink.setup_publish(&mut index, topic, payload, true, true);
         if topic != "inventory" {
             chunks += 1;
         }
@@ -700,9 +797,22 @@ fn publish_setup(
     // Shrink (fewer chunks, or chunked→single with chunks == 0): clear orphaned retained
     // chunk topics with an empty payload.
     for i in chunks..*last_inventory_chunks {
-        sink.publish(&format!("inventory/chunk/{i}"), "", true);
+        sink.setup_publish(&mut index, &format!("inventory/chunk/{i}"), "", true, true);
     }
-    *last_inventory_chunks = chunks;
+    runtime.republish_for_each(&mut |action| {
+        if let Action::Publish {
+            topic,
+            payload,
+            retain,
+        } = action
+        {
+            sink.setup_publish(&mut index, &topic, &payload, retain, true);
+        }
+    });
+    sink.end_setup_pass(index);
+    if !sink.setup_pending() {
+        *last_inventory_chunks = chunks;
+    }
 }
 
 /// Heap figures in bytes: `(free, largest free block, low-water mark since boot)`. Plain
@@ -730,7 +840,11 @@ fn diagnostics_payload(app: &Arc<Mutex<App>>, now: u64) -> String {
         "uptime_s": now / 1000,
         "firmware_version": env!("CARGO_PKG_VERSION"),
         "schema_version": telenot_config::CURRENT_SCHEMA_VERSION,
-        "reconnects": 0,
+        "reconnects": a.mqtt_reconnects,
+        "mqtt_connected": a.mqtt_connected,
+        "mqtt_publish_errors": a.mqtt_publish_errors,
+        "mqtt_setup_pending": a.mqtt_setup_pending,
+        "confirmed_sensors": a.mqtt_discovery_count,
         // Stability signals for HA: reboot forensics + heap early warning.
         "boot_reason": a.boot_reason,
         "boot_count": a.boot_count,
@@ -746,11 +860,17 @@ fn apply_actions(
     transport: &mut dyn PanelTransport,
     sink: &mut EspMqttSink,
     nvs: &EspDefaultNvs,
+    app: &Arc<Mutex<App>>,
 ) {
     for a in actions {
         match a {
             Action::SendFrame(bytes) => {
-                if let Err(e) = transport.write_frame(&bytes) {
+                let result = transport.write_frame(&bytes);
+                app.lock()
+                    .unwrap()
+                    .capture
+                    .record_tx(now_ms(), &bytes, result.is_ok());
+                if let Err(e) = result {
                     log::error!("Panel-TX fehlgeschlagen: {e}");
                 }
             }
