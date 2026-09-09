@@ -154,5 +154,6 @@ export const API = { live: false, csrf: null };
     command: (cmd, pin, extra) =>
       req("POST", "/command", Object.assign({ cmd, pin: pin || undefined }, extra || {})),
     getReview: () => req("GET", "/review"),
-    commit: (warnings_acknowledged) => req("POST", "/commit", { warnings_acknowledged: !!warnings_acknowledged }),
+    commit: (warnings_acknowledged, expected_sensors, expected_confirmed) => req("POST", "/commit", { warnings_acknowledged: !!warnings_acknowledged, expected_sensors, expected_confirmed }),
+    getCommit: () => req("GET", "/commit"),
   });

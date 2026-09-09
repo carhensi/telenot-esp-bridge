@@ -189,6 +189,21 @@ fn main() -> Result<(), EspError> {
             a.boot_reason
         );
         a.ring.push(0, "info", boot_line);
+        let mut previous_error = [0u8; 768];
+        if let Ok(Some(error)) = nvs_cfg.get_str("cfg_error", &mut previous_error) {
+            a.ring
+                .push(0, "error", format!("Letzter Speicherfehler: {error}"));
+        }
+        a.ring.push(
+            0,
+            "info",
+            format!(
+                "Config beim Boot geladen: {} Sensoren, {} bestätigt, Anlage {:?}",
+                config.sensors.len(),
+                config.sensors.iter().filter(|s| s.confirmed()).count(),
+                config.panel.kind,
+            ),
+        );
         log::info!(
             "MQTT-Ziel: {}:{} ({})",
             a.setup.mqtt.host,

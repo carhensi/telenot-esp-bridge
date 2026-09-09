@@ -817,7 +817,20 @@ fn ema_loop(
                 }
                 Intent::ReloadConfig(cfg) => {
                     if let Some(p) = &config_path {
-                        let _ = std::fs::write(p, cfg.to_json().unwrap_or_default());
+                        let result = cfg
+                            .to_json()
+                            .map_err(|e| e.to_string())
+                            .and_then(|json| std::fs::write(p, json).map_err(|e| e.to_string()));
+                        if let Err(e) = result {
+                            app.lock().unwrap().finish_commit(&cfg, Err(e.clone()));
+                            push_log(
+                                &app,
+                                now,
+                                "error",
+                                &format!("Config speichern fehlgeschlagen: {e}"),
+                            );
+                            continue;
+                        }
                     }
                     // After commit the device is considered configured → a reload lands on the
                     // dashboard (mirrors real firmware, which goes live immediately after reboot).
@@ -826,6 +839,7 @@ fn ema_loop(
                         a.device.configured = true;
                         // App and core share the Arc (one sensor table in steady state).
                         a.persisted = Arc::clone(&cfg);
+                        a.finish_commit(&cfg, Ok(()));
                     }
                     push_log(&app, now, "info", "Konfiguration gespeichert & neu geladen");
                     // Symmetric to connect: always refresh inventory (path-B consumers,

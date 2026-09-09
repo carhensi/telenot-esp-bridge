@@ -314,7 +314,19 @@ impl<P: NvsPartitionId> BlobStore for NvsBlobStore<'_, P> {
     fn set_blob(&mut self, key: &str, val: &[u8]) -> Result<(), StoreError> {
         self.0
             .set_blob(key, val)
-            .map_err(|e| StoreError(format!("set_blob({key}): {e}")))
+            .map_err(|e| StoreError(format!("set_blob({key}): {e}")))?;
+        // Verify each bounded blob before acknowledging the save, including the meta commit.
+        let mut readback = vec![0; val.len()];
+        let stored = self
+            .0
+            .get_blob(key, &mut readback)
+            .map_err(|e| StoreError(format!("readback({key}): {e}")))?;
+        if stored != Some(val) {
+            return Err(StoreError(format!(
+                "Readback-Pruefung fehlgeschlagen: {key}"
+            )));
+        }
+        Ok(())
     }
 
     fn remove(&mut self, key: &str) -> Result<(), StoreError> {

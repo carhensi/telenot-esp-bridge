@@ -610,6 +610,8 @@ impl SetupState {
 /// Complete HTTP-side state. Held behind `Arc<Mutex<App>>` by HTTP threads and the serial
 /// owner (briefly).
 pub struct App {
+    pub commit_status: crate::dto::CommitStatus,
+    pub pending_commit: Option<Arc<Config>>,
     pub device: DeviceInfo,
     pub setup: SetupState,
     /// Currently active/persisted config — the SAME `Arc` the core holds (steady state:
@@ -664,6 +666,8 @@ pub struct App {
 impl App {
     pub fn new(device: DeviceInfo, services: Box<dyn Services>) -> Self {
         App {
+            commit_status: Default::default(),
+            pending_commit: None,
             device,
             setup: SetupState::default(),
             persisted: Arc::new(Config::default()),
@@ -795,6 +799,28 @@ impl App {
                 cfg
             }
         }
+    }
+
+    /// Only the owner reports completion, after storage has accepted this exact config.
+    pub fn finish_commit(&mut self, cfg: &Arc<Config>, result: Result<(), String>) {
+        if !self
+            .pending_commit
+            .as_ref()
+            .is_some_and(|pending| Arc::ptr_eq(pending, cfg))
+        {
+            return;
+        }
+        self.pending_commit = None;
+        self.commit_status = match result {
+            Ok(()) => crate::dto::CommitStatus::Saved {
+                sensors: cfg.sensors.len(),
+            },
+            Err(message) => {
+                // Preserve the user's selection for export/retry after a failed write.
+                self.setup.seed_persisted((**cfg).clone());
+                crate::dto::CommitStatus::Failed { message }
+            }
+        };
     }
 
     /// NON-consuming working config (export/HomeKit apply): builds a fresh table from

@@ -4,6 +4,7 @@ const { useState, useEffect, useRef, useCallback, useMemo } = React;
 import { I18N } from './i18n.js';
 import { MOCK } from './mock.js';
 import { API } from './api.js';
+import { saveAndReboot } from './save-config.js';
 import { Icon, Brandmark, Button, StatusDot, Modal, hex, fmtClock } from './ui.jsx';
 import { ScreenBoot, ScreenLogin, ScreenSerial, ScreenScan, ScreenSensors } from './wizard.jsx';
 import { ScreenMqtt, ScreenSecurity } from './integration.jsx';
@@ -524,13 +525,14 @@ function App() {
 
   const commit = useCallback(async () => {
     if (live && API) {
-      try { await API.commit(true); } catch (e) { toast("err", (e && e.message) || t("s8.commit")); return; }
-      // Config saved → real reboot. Applies the config and starts HomeKit (HAP only runs
-      // with a config present). Fire-and-forget — the device reboots regardless.
-      API.reboot().catch(() => {});
+      try {
+        await saveAndReboot(API, sensors.filter(s => s.status !== "excluded").length,
+          sensors.filter(s => s.status === "confirmed").length);
+      } catch (e) { toast("err", (e && e.message) || t("s8.commit")); return false; }
     }
     setView("reboot"); window.scrollTo(0, 0);
-  }, [live, toast, t]);
+    return true;
+  }, [live, toast, t, sensors]);
 
   // Live test board: arm/disarm. Live → real /command (disarm fail-closed); offline → demo toast.
   // lastCmdAt triggers a fast state poll in the dashboard to reduce perceived latency.

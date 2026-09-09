@@ -239,6 +239,18 @@ pub fn dispatch(app: &mut App, req: &ApiRequest) -> ApiResponse {
         },
         // Reboot the device (picks up an MQTT↔HomeKit mode switch).
         (Method::Post, ["reboot"]) => {
+            if app.pending_commit.is_some()
+                || matches!(app.commit_status, crate::dto::CommitStatus::Failed { .. })
+            {
+                return err(
+                    409,
+                    "commit_not_saved",
+                    "Konfiguration noch nicht erfolgreich gespeichert. Kein Neustart.",
+                );
+            }
+            if app.setup.session.is_some() {
+                return err(409, "unsaved_sensors", "Melderauswahl noch nicht übernommen. Bitte im letzten Setup-Schritt speichern.");
+            }
             app.intents.push(Intent::Reboot);
             ApiResponse::empty(204)
         }
@@ -286,6 +298,7 @@ pub fn dispatch(app: &mut App, req: &ApiRequest) -> ApiResponse {
 
         (Method::Get, ["review"]) => sensors::handle_review(app),
         (Method::Post, ["commit"]) => sensors::handle_commit(app, req),
+        (Method::Get, ["commit"]) => ok_json(200, &app.commit_status),
 
         // Settings backup: export/import as JSON (migration safety net, e.g. before
         // repartitioning for OTA). Intentionally excludes secrets.

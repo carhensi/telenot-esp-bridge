@@ -485,6 +485,24 @@ pub struct ReviewDto {
 pub struct CommitReq {
     #[serde(default)]
     pub warnings_acknowledged: bool,
+    #[serde(default)]
+    pub expected_sensors: Option<usize>,
+    #[serde(default)]
+    pub expected_confirmed: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CommitStatus {
+    #[default]
+    Idle,
+    Pending,
+    Saved {
+        sensors: usize,
+    },
+    Failed {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]

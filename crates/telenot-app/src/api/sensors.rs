@@ -344,6 +344,16 @@ pub(super) fn handle_bulk(app: &mut App, req: &ApiRequest) -> ApiResponse {
         Err(e) => return e,
     };
     let sess = app.edit();
+    if b.addresses
+        .iter()
+        .any(|addr| sess.find_idx(*addr).is_none())
+    {
+        return err(
+            409,
+            "inventory_changed",
+            "Melderliste hat sich geaendert. Bitte neu laden.",
+        );
+    }
     let mut updated = 0;
     for addr in &b.addresses {
         let Some(idx) = sess.find_idx(*addr) else {
@@ -396,9 +406,18 @@ pub(super) fn handle_review(app: &App) -> ApiResponse {
 }
 
 pub(super) fn handle_commit(app: &mut App, req: &ApiRequest) -> ApiResponse {
+    if app.pending_commit.is_some() {
+        return err(
+            409,
+            "commit_pending",
+            "Speichern läuft bereits. Bitte warten.",
+        );
+    }
     let body: CommitReq = if req.body.is_empty() {
         CommitReq {
             warnings_acknowledged: false,
+            expected_sensors: None,
+            expected_confirmed: None,
         }
     } else {
         match parse_body(req) {
@@ -406,6 +425,15 @@ pub(super) fn handle_commit(app: &mut App, req: &ApiRequest) -> ApiResponse {
             Err(e) => return e,
         }
     };
+    let counts = app.sensor_counts();
+    let included = counts.confirmed + counts.unconfirmed;
+    if body.expected_sensors.is_some_and(|n| n != included)
+        || body
+            .expected_confirmed
+            .is_some_and(|n| n != counts.confirmed)
+    {
+        return err(409, "inventory_changed", "Melderliste auf dem Gerät stimmt nicht mit der Anzeige überein. Seite neu laden; es wurde nichts gespeichert.");
+    }
     let issues = app.working_issues();
     if issues.iter().any(|i| i.severity == Severity::Error) {
         return err(400, "invalid_config", "Konfiguration enthält Fehler");
@@ -420,8 +448,9 @@ pub(super) fn handle_commit(app: &mut App, req: &ApiRequest) -> ApiResponse {
     }
     // Consumes the edit session in place (no second sensor table on the device heap).
     // Persistence and runtime reload are handled by the daemon when routing this intent.
-    let cfg = app.take_commit_config();
-    app.intents
-        .push(Intent::ReloadConfig(std::sync::Arc::new(cfg)));
-    ok_json(200, &CommitResp { rebooting: true })
+    let cfg = std::sync::Arc::new(app.take_commit_config());
+    app.pending_commit = Some(std::sync::Arc::clone(&cfg));
+    app.commit_status = crate::dto::CommitStatus::Pending;
+    app.intents.push(Intent::ReloadConfig(cfg));
+    ok_json(202, &CommitResp { rebooting: false })
 }
