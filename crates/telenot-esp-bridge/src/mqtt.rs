@@ -79,6 +79,9 @@ pub struct EspMqttSink {
     connected: Arc<AtomicBool>,
     connections: Arc<AtomicU32>,
     pub publish_errors: u32,
+    /// Retained discovery topics to clear (empty payload), queued at config reload and
+    /// delivered through the setup batch so they survive disconnects and retries.
+    pending_deletions: Vec<String>,
     setup: telenot_app::mqtt::PublishBatch,
     retry: bool,
     last_retry: u64,
@@ -99,6 +102,7 @@ impl EspMqttSink {
             connected: Arc::new(AtomicBool::new(false)),
             connections: Arc::new(AtomicU32::new(0)),
             publish_errors: 0,
+            pending_deletions: Vec::new(),
             setup: telenot_app::mqtt::PublishBatch::default(),
             retry: false,
             last_retry: 0,
@@ -276,6 +280,7 @@ impl EspMqttSink {
             connected,
             connections,
             publish_errors: 0,
+            pending_deletions: Vec::new(),
             setup: telenot_app::mqtt::PublishBatch::default(),
             retry: false,
             last_retry: 0,
@@ -288,6 +293,22 @@ impl EspMqttSink {
 
     pub fn request_setup(&mut self) {
         self.setup.restart();
+    }
+    /// Queue a retained-topic clear (deduplicated); delivered in the next setup passes.
+    pub fn queue_deletion(&mut self, topic: String) {
+        if !self.pending_deletions.contains(&topic) {
+            self.pending_deletions.push(topic);
+        }
+    }
+    /// Stable snapshot of the queued clears for this setup pass.
+    pub fn pending_deletions(&self) -> Vec<String> {
+        self.pending_deletions.clone()
+    }
+    /// A completed setup pass has delivered every queued clear.
+    pub fn clear_delivered_deletions(&mut self) {
+        if !self.setup.pending() {
+            self.pending_deletions.clear();
+        }
     }
     pub fn setup_ready(&self) -> bool {
         self.setup.pending()

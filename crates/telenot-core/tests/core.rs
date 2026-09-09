@@ -983,3 +983,28 @@ fn wrong_panel_selection_warns_once_after_three_snapshots() {
             .all(|a| !matches!(a, Action::Log(m) if m.contains("Zentralen-Auswahl"))));
     }
 }
+
+#[test]
+fn republish_recovers_readiness_and_bypass_state() {
+    // A ready/bypass transition during a broker outage is dropped by the sink —
+    // the reconnect recovery must therefore re-emit BOTH retained topic families.
+    let mut c = core(false);
+    c.on_frame(1000, &decode(OUTSTATUS_DISARMED)); // sets area-1 readiness bits
+                                                   // Bypass readback block: base 0x05F0, bit 0 active-low → MB 1 bypassed.
+    let bypass = Frame::new(&[0x73, 2, 5, 0x24, 0, 0x05, 0xF0, 2, 0xFE]).unwrap();
+    c.on_frame(2000, &bypass);
+    assert_eq!(c.mb_bypassed().get(&1), Some(&true));
+    let mut topics = Vec::new();
+    c.republish_for_each(&mut |a| {
+        if let Action::Publish { topic, payload, .. } = a {
+            topics.push((topic, payload));
+        }
+    });
+    let intern = c.intern_ready().expect("readiness known after snapshot");
+    assert!(topics.contains(&(
+        "ready/intern".into(),
+        if intern { "yes" } else { "no" }.into()
+    )));
+    assert!(topics.iter().any(|(t, _)| t == "ready/extern"));
+    assert!(topics.contains(&("mb/1/bypassed".into(), "ON".into())));
+}

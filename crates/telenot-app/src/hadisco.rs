@@ -372,6 +372,34 @@ pub fn discovery_for_each(config: &Config, o: &DiscoveryOpts, emit: &mut dyn FnM
     }
 }
 
+/// Retained HA discovery topics that must be CLEARED when switching from `old` to
+/// `new`: removed confirmed sensors (binary_sensor + their switch entity) and sensors
+/// whose `switchable` flag was withdrawn (switch entity only). The caller queues these
+/// for durable, retried delivery — a one-shot publish during a broker outage would
+/// leave orphaned entities in HA forever.
+pub fn deletion_topics(old: &Config, new: &Config, discovery_prefix: &str) -> Vec<String> {
+    let mut topics = Vec::new();
+    for old_s in old.sensors.iter().filter(|s| s.confirmed()) {
+        let new_s = new
+            .sensors
+            .iter()
+            .find(|s| s.confirmed() && s.address() == old_s.address());
+        if new_s.is_none() {
+            topics.push(format!(
+                "{discovery_prefix}/binary_sensor/{HA_ID}/{HA_ID}_{:04x}/config",
+                old_s.address()
+            ));
+        }
+        if old_s.switchable() && !new_s.as_ref().is_some_and(|s| s.switchable()) {
+            topics.push(format!(
+                "{discovery_prefix}/switch/{HA_ID}/{HA_ID}_{:04x}_switch/config",
+                old_s.address()
+            ));
+        }
+    }
+    topics
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -572,5 +600,38 @@ mod tests {
 
         // in controllable mode, NO read-only alarm-state sensor (no duplicate entity)
         assert!(!msgs.iter().any(|m| m.topic.contains("alarm_state")));
+    }
+
+    #[test]
+    fn deletion_topics_cover_removed_and_unswitched_sensors() {
+        let mk = |addr: u16, switchable: bool| telenot_config::Sensor {
+            address: addr,
+            name: "S".into(),
+            name_ha: "S".into(),
+            kind: telenot_config::SensorKind::Unbekannt,
+            topic: format!("s{addr:x}"),
+            polarity: telenot_config::Polarity::ActiveLow,
+            confirmed: true,
+            switchable,
+            show_in_homekit: false,
+        };
+        let cfg = |sensors: &[telenot_config::Sensor]| Config {
+            schema_version: telenot_config::CURRENT_SCHEMA_VERSION,
+            sensors: telenot_config::SensorTable::from_sensors(sensors).unwrap(),
+            panel: Default::default(),
+        };
+        // 0x10 removed (was switchable), 0x11 loses switchable, 0x12 unchanged.
+        let old = cfg(&[mk(0x10, true), mk(0x11, true), mk(0x12, false)]);
+        let new = cfg(&[mk(0x11, false), mk(0x12, false)]);
+        let topics = deletion_topics(&old, &new, "homeassistant");
+        assert_eq!(
+            topics,
+            vec![
+                "homeassistant/binary_sensor/telenot-bridge/telenot-bridge_0010/config".to_string(),
+                "homeassistant/switch/telenot-bridge/telenot-bridge_0010_switch/config".to_string(),
+                "homeassistant/switch/telenot-bridge/telenot-bridge_0011_switch/config".to_string(),
+            ]
+        );
+        assert!(deletion_topics(&new, &new, "homeassistant").is_empty());
     }
 }

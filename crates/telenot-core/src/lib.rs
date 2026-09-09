@@ -951,6 +951,29 @@ impl Core {
                 publish(format!("area/{area}/state"), state.arm.as_str(), emit);
             }
         }
+        // Readiness + bypass readback are retained change-only topics too — without
+        // them a transition during a broker outage stays stale in HA forever (the
+        // disconnected sink drops publishes instead of queueing them).
+        let multi = self.profile.areas.count > 1;
+        for (&area, st) in &self.areas {
+            for (slot, suffix) in [(st.intern_bereit, "intern"), (st.extern_bereit, "extern")] {
+                if let Some(ready) = slot {
+                    let topic = if multi {
+                        format!("area/{area}/ready/{suffix}")
+                    } else {
+                        format!("ready/{suffix}")
+                    };
+                    publish(topic, if ready { "yes" } else { "no" }, emit);
+                }
+            }
+        }
+        for (&mb, &bypassed) in &self.mb_bypassed {
+            publish(
+                format!("mb/{mb}/bypassed"),
+                if bypassed { "ON" } else { "OFF" },
+                emit,
+            );
+        }
         for s in self.config.sensors.iter().filter(|s| s.confirmed()) {
             let active = self.sensor_state.get(&s.address());
             publish(

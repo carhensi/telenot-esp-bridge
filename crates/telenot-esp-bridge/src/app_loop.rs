@@ -326,7 +326,11 @@ pub fn run(
                     mqtt.pinned_cert.as_deref(),
                     app.clone(),
                 ) {
-                    Ok(s) => {
+                    Ok(mut s) => {
+                        // The queued retained-topic clears must survive the sink swap.
+                        for topic in sink.pending_deletions() {
+                            s.queue_deletion(topic);
+                        }
                         sink = s;
                         sink.request_setup();
                         publish_setup(&mut sink, &mqtt, &runtime, &mut last_inventory_chunks);
@@ -481,37 +485,16 @@ pub fn run(
                         }
                         // Config lives only in the core afterwards (runtime.config() borrows it) —
                         // a third copy in the loop was part of the boot OOM.
-                        if sink.is_connected() {
-                            for old in runtime.config().sensors.iter().filter(|s| s.confirmed()) {
-                                if !cfg
-                                    .sensors
-                                    .iter()
-                                    .any(|s| s.confirmed() && s.address() == old.address())
-                                {
-                                    sink.publish_raw(
-                                        &format!(
-                                            "homeassistant/binary_sensor/{0}/{0}_{1:04x}/config",
-                                            telenot_app::hadisco::HA_ID,
-                                            old.address()
-                                        ),
-                                        "",
-                                        true,
-                                    );
-                                    // Switchable outputs get a second (switch) entity in
-                                    // HA discovery — clear it too, no orphaned entities.
-                                    if old.switchable() {
-                                        sink.publish_raw(
-                                            &format!(
-                                                "homeassistant/switch/{0}/{0}_{1:04x}_switch/config",
-                                                telenot_app::hadisco::HA_ID,
-                                                old.address()
-                                            ),
-                                            "",
-                                            true,
-                                        );
-                                    }
-                                }
-                            }
+                        // Queue retained-entity clears ALWAYS (also while disconnected):
+                        // they ride the setup batch with retries — a one-shot publish
+                        // here would orphan HA entities across a broker outage, and the
+                        // old config is gone after reload().
+                        for topic in telenot_app::hadisco::deletion_topics(
+                            runtime.config(),
+                            &cfg,
+                            "homeassistant",
+                        ) {
+                            sink.queue_deletion(topic);
                         }
                         runtime.reload(cfg, telenot_app::security::disarm_enabled(remote, pin_set));
                         // Align discovery/inventory with the new config (retained).
@@ -747,6 +730,11 @@ fn publish_setup(
     let config = runtime.config();
     sink.begin_setup_pass();
     let mut index = 0;
+    // Queued retained-topic clears first (removed/de-switched entities): same batch,
+    // same retry semantics; cleared from the queue only after a completed pass.
+    for topic in sink.pending_deletions() {
+        sink.setup_publish(&mut index, &topic, "", true, false);
+    }
     if m.ha_discovery {
         if config.panel.kind == telenot_config::PanelKind::Hiplex8400
             && config.panel.gms_variant == telenot_config::GmsVariant::Plus
@@ -804,6 +792,7 @@ fn publish_setup(
         }
     });
     sink.end_setup_pass(index);
+    sink.clear_delivered_deletions();
     if !sink.setup_pending() {
         *last_inventory_chunks = chunks;
     }
