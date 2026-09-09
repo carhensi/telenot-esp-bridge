@@ -21,6 +21,7 @@ pub mod command;
 pub mod dto;
 pub mod dup;
 pub mod hadisco;
+pub mod http_policy;
 pub mod inventory;
 pub mod mqtt;
 pub mod ota;
