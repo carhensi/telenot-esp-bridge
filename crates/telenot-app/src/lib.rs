@@ -18,6 +18,7 @@
 pub mod api;
 pub mod app;
 pub mod command;
+mod diagnostic_probe;
 pub mod dto;
 pub mod dup;
 pub mod hadisco;

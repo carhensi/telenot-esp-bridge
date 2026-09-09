@@ -90,6 +90,9 @@ pub(super) fn handle_capture_status(app: &App) -> ApiResponse {
     ok_json(
         200,
         &CaptureStatusDto {
+            hiplex_probe: c.hiplex_probe,
+            trace_used: c.trace_used(),
+            trace_full: c.trace_full,
             active: c.active,
             mode: c.mode.as_str().into(),
             sends: c.mode.sends_desc().into(),

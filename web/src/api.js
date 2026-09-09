@@ -105,13 +105,14 @@ export const API = { live: false, csrf: null };
     startCapture: (mode) => req("POST", "/debug/capture/start", { mode }),
     stopCapture: () => req("POST", "/debug/capture/stop"),
     getCapture: () => req("GET", "/debug/capture"),
-    async downloadCapture() {
-      const r = await fetch(BASE + "/debug/capture.bin", { credentials: "same-origin" });
+    async downloadCapture(trace = false) {
+      const name = trace ? "capture.trace" : "capture.bin";
+      const r = await fetch(BASE + "/debug/" + name, { credentials: "same-origin" });
       if (!r.ok) throw new Error("HTTP " + r.status);
       const blob = await r.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
-      a.href = url; a.download = "telenot-capture.bin";
+      a.href = url; a.download = "telenot-" + name;
       document.body.appendChild(a); a.click(); a.remove();
       window.URL.revokeObjectURL(url);
     },

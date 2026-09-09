@@ -211,7 +211,8 @@ pub fn dispatch(app: &mut App, req: &ApiRequest) -> ApiResponse {
         (Method::Get, ["connection", "check"]) => sensors::handle_connection_check_status(app),
 
         (Method::Post, ["scan", "start"]) => {
-            app.intents.push(Intent::StartScan);
+            app.intents
+                .push(Intent::StartScanFor(app.setup.panel.clone()));
             ok_json(202, &serde_json::json!({"phase":"belegt"}))
         }
         (Method::Post, ["scan", "cancel"]) => sensors::handle_scan_cancel(app, req),
@@ -293,6 +294,9 @@ pub fn dispatch(app: &mut App, req: &ApiRequest) -> ApiResponse {
         }
         (Method::Get, ["debug", "capture"]) => diagnostics::handle_capture_status(app),
         (Method::Get, ["debug", "capture.bin"]) => ApiResponse::binary(200, app.capture.bytes()),
+        (Method::Get, ["debug", "capture.trace"]) => {
+            ApiResponse::binary(200, app.capture.trace_bytes())
+        }
 
         (Method::Get, ["state"]) => diagnostics::handle_state(app),
 

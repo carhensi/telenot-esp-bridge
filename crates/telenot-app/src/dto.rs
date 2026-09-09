@@ -406,6 +406,9 @@ pub struct RecTypeCount {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CaptureStatusDto {
+    pub hiplex_probe: bool,
+    pub trace_used: usize,
+    pub trace_full: bool,
     pub active: bool,
     /// "listen" | "listen_ack" | "discover".
     pub mode: String,

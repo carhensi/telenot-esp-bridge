@@ -909,3 +909,77 @@ fn eager_disabled_is_todays_behavior() {
         "delivered in the poll window"
     );
 }
+
+#[test]
+fn sensor_freshness_expires_while_other_frames_continue_and_recovers() {
+    let mut c = core(false);
+    c.on_frame(1000, &decode(INSTATUS));
+    assert!(c.sensor_states().contains_key(&0x75));
+    c.on_frame(10000, &decode(OUTSTATUS_DISARMED));
+    let actions = c.on_tick(10001);
+    assert!(!c.sensor_states().contains_key(&0x75));
+    assert!(actions.iter().any(|a| matches!(a, Action::Publish { topic, payload, .. } if topic == "sensor/eg/essen/bewegung/availability" && payload == "offline")));
+    let actions = c.on_frame(11000, &decode(INSTATUS));
+    assert!(c.sensor_states().contains_key(&0x75));
+    assert!(actions.iter().any(|a| matches!(a, Action::Publish { topic, payload, .. } if topic == "sensor/eg/essen/bewegung/availability" && payload == "online")));
+    assert!(actions.iter().any(
+        |a| matches!(a, Action::Publish { topic, .. } if topic == "sensor/eg/essen/bewegung/state")
+    ));
+}
+
+#[test]
+fn complex_accepts_status_blocks_from_nonzero_devices() {
+    // The documented Telenot reference telegram carries Geraet 0x10 — the device-0
+    // filter is a hiplex-plus-only rule and must never drop complex status blocks.
+    let sensors = [Sensor {
+        address: 0x0000,
+        name: "T".into(),
+        name_ha: "T".into(),
+        kind: SensorKind::Unbekannt,
+        topic: "t".into(),
+        polarity: Polarity::ActiveLow,
+        confirmed: true,
+        switchable: false,
+        show_in_homekit: false,
+    }];
+    let cfg = Config {
+        schema_version: CURRENT_SCHEMA_VERSION,
+        sensors: telenot_config::SensorTable::from_sensors(&sensors).unwrap(),
+        panel: Default::default(),
+    };
+    let mut c = Core::new(std::sync::Arc::new(cfg), CoreOptions::default());
+    let frame = Frame::new(&[0x73, 2, 5, 0x24, 0x10, 0, 0, 1, 0xFE]).unwrap();
+    let actions = c.on_frame(1000, &frame);
+    assert!(actions
+        .iter()
+        .any(|a| matches!(a, Action::Publish { topic, payload, .. }
+        if topic == "sensor/t/state" && payload == "ON")));
+}
+
+#[test]
+fn wrong_panel_selection_warns_once_after_three_snapshots() {
+    // hiplex plus selected, but the wire carries REAL complex output blocks (mode bits
+    // at 0x0530, none at 0x0500) → exactly one latched diagnostic warning per boot.
+    let mut cfg = Config::default();
+    cfg.panel.kind = telenot_config::PanelKind::Hiplex8400;
+    cfg.panel.gms_variant = telenot_config::GmsVariant::Plus;
+    let mut c = Core::new(std::sync::Arc::new(cfg), CoreOptions::default());
+    let mut warnings = 0;
+    for i in 0..5u64 {
+        warnings += c
+            .on_frame(1000 + i, &decode(OUTSTATUS_DISARMED))
+            .iter()
+            .filter(|a| matches!(a, Action::Log(m) if m.contains("Zentralen-Auswahl")))
+            .count();
+    }
+    assert_eq!(warnings, 1, "one warning, latched");
+
+    // Correctly selected complex never warns on its own frames.
+    let mut c = core(false);
+    for i in 0..5u64 {
+        assert!(c
+            .on_frame(1000 + i, &decode(OUTSTATUS_DISARMED))
+            .iter()
+            .all(|a| !matches!(a, Action::Log(m) if m.contains("Zentralen-Auswahl"))));
+    }
+}
