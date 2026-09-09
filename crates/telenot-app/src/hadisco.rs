@@ -377,27 +377,43 @@ pub fn discovery_for_each(config: &Config, o: &DiscoveryOpts, emit: &mut dyn FnM
 /// whose `switchable` flag was withdrawn (switch entity only). The caller queues these
 /// for durable, retried delivery — a one-shot publish during a broker outage would
 /// leave orphaned entities in HA forever.
-pub fn deletion_topics(old: &Config, new: &Config, discovery_prefix: &str) -> Vec<String> {
-    let mut topics = Vec::new();
-    for old_s in old.sensors.iter().filter(|s| s.confirmed()) {
-        let new_s = new
-            .sensors
-            .iter()
-            .find(|s| s.confirmed() && s.address() == old_s.address());
-        if new_s.is_none() {
-            topics.push(format!(
-                "{discovery_prefix}/binary_sensor/{HA_ID}/{HA_ID}_{:04x}/config",
-                old_s.address()
-            ));
-        }
-        if old_s.switchable() && !new_s.as_ref().is_some_and(|s| s.switchable()) {
-            topics.push(format!(
-                "{discovery_prefix}/switch/{HA_ID}/{HA_ID}_{:04x}_switch/config",
-                old_s.address()
-            ));
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EntityDeletion {
+    pub address: u16,
+    pub switch: bool,
+}
+impl EntityDeletion {
+    pub fn topic(self) -> String {
+        let platform = if self.switch {
+            "switch"
+        } else {
+            "binary_sensor"
+        };
+        let suffix = if self.switch { "_switch" } else { "" };
+        format!(
+            "homeassistant/{platform}/{HA_ID}/{HA_ID}_{:04x}{suffix}/config",
+            self.address
+        )
+    }
+    pub fn still_present(self, config: &Config) -> bool {
+        config.sensors.iter().any(|s| {
+            s.address() == self.address && s.confirmed() && (!self.switch || s.switchable())
+        })
+    }
+}
+
+pub fn deletions_for_each(old: &Config, new: &Config, emit: &mut dyn FnMut(EntityDeletion)) {
+    for s in old.sensors.iter().filter(|s| s.confirmed()) {
+        for switch in [false, true] {
+            let deletion = EntityDeletion {
+                address: s.address(),
+                switch,
+            };
+            if (!switch || s.switchable()) && !deletion.still_present(new) {
+                emit(deletion);
+            }
         }
     }
-    topics
 }
 
 #[cfg(test)]
@@ -623,7 +639,8 @@ mod tests {
         // 0x10 removed (was switchable), 0x11 loses switchable, 0x12 unchanged.
         let old = cfg(&[mk(0x10, true), mk(0x11, true), mk(0x12, false)]);
         let new = cfg(&[mk(0x11, false), mk(0x12, false)]);
-        let topics = deletion_topics(&old, &new, "homeassistant");
+        let mut topics = Vec::new();
+        deletions_for_each(&old, &new, &mut |d| topics.push(d.topic()));
         assert_eq!(
             topics,
             vec![
@@ -632,6 +649,6 @@ mod tests {
                 "homeassistant/switch/telenot-bridge/telenot-bridge_0011_switch/config".to_string(),
             ]
         );
-        assert!(deletion_topics(&new, &new, "homeassistant").is_empty());
+        deletions_for_each(&new, &new, &mut |_| panic!("unchanged entity"));
     }
 }

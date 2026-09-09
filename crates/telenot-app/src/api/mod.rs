@@ -225,19 +225,19 @@ pub fn dispatch(app: &mut App, req: &ApiRequest) -> ApiResponse {
         },
         // Apply pending HomeKit detector set LIVE: persist config (no reboot) and signal
         // the HAP thread to reconcile the accessory set. Session/CSRF-gated (POST).
-        (Method::Post, ["homekit", "apply"]) => match app.working_config() {
-            Ok(cfg) => {
-                app.intents
-                    .push(Intent::ReloadConfig(std::sync::Arc::new(cfg)));
+        (Method::Post, ["homekit", "apply"]) => {
+            let response = sensors::handle_commit(
+                app,
+                &ApiRequest {
+                    body: br#"{"warnings_acknowledged":true}"#.to_vec(),
+                    ..req.clone()
+                },
+            );
+            if response.status == 202 {
                 app.intents.push(Intent::ApplyHomekit);
-                ApiResponse::empty(204)
             }
-            Err(_) => err(
-                500,
-                "config_too_large",
-                "Konfiguration zu groß für den Gerätespeicher",
-            ),
-        },
+            response
+        }
         // Reboot the device (picks up an MQTT↔HomeKit mode switch).
         (Method::Post, ["reboot"]) => {
             if app.pending_commit.is_some()

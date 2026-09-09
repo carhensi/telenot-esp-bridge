@@ -1161,3 +1161,43 @@ fn stale_browser_inventory_cannot_commit_empty_device_config() {
     assert_eq!(jval(&r)["error"]["code"], "inventory_changed");
     assert!(app.intents.is_empty());
 }
+
+#[test]
+fn homekit_apply_consumes_session_and_reboot_waits_for_storage() {
+    let mut a = app();
+    let (session, csrf) = login(&mut a);
+    a.edit();
+    let call = |a: &mut App, path: &str| {
+        dispatch(
+            a,
+            &req(Method::Post, path, json!({}), Some(&session), Some(&csrf)),
+        )
+    };
+    assert_eq!(call(&mut a, "/api/v1/homekit/apply").status, 202);
+    assert!(a.setup.session.is_none());
+    assert_eq!(call(&mut a, "/api/v1/reboot").status, 409);
+    let cfg = a.pending_commit.clone().unwrap();
+    a.persisted = cfg.clone();
+    a.finish_commit(&cfg, Ok(()));
+    assert_eq!(call(&mut a, "/api/v1/reboot").status, 204);
+}
+
+#[test]
+fn failed_homekit_apply_restores_edits_and_blocks_reboot() {
+    let mut a = app();
+    let (session, csrf) = login(&mut a);
+    a.edit();
+    let call = |a: &mut App, path: &str| {
+        dispatch(
+            a,
+            &req(Method::Post, path, json!({}), Some(&session), Some(&csrf)),
+        )
+    };
+    assert_eq!(call(&mut a, "/api/v1/homekit/apply").status, 202);
+    assert_eq!(call(&mut a, "/api/v1/homekit/apply").status, 409);
+    let cfg = a.pending_commit.clone().unwrap();
+    a.finish_commit(&cfg, Err("NVS voll".into()));
+    assert!(a.setup.session.is_some());
+    assert_eq!(call(&mut a, "/api/v1/reboot").status, 409);
+    assert_eq!(call(&mut a, "/api/v1/homekit/apply").status, 202);
+}

@@ -1,4 +1,5 @@
 // REST client (pure ES module). Extracted from main.jsx.
+import { waitForCommit } from "./save-config.js";
 
   const BASE = "/api/v1";
 export const API = { live: false, csrf: null };
@@ -88,7 +89,11 @@ export const API = { live: false, csrf: null };
     getMqtt: () => req("GET", "/mqtt"),
     putMqtt: (m) => req("PUT", "/mqtt", m),
     getHomekit: () => req("GET", "/homekit"),
-    applyHomekit: () => req("POST", "/homekit/apply"),
+    applyHomekit: async () => {
+      if (API.sensorEditsPending) throw new Error("Melderänderungen werden noch gespeichert. Bitte warten.");
+      await req("POST", "/homekit/apply");
+      await waitForCommit(API);
+    },
     reboot: () => req("POST", "/reboot"),
     testMqtt: () => req("POST", "/mqtt/test"),
     getMqttTest: () => req("GET", "/mqtt/test"),

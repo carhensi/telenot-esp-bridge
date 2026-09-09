@@ -113,6 +113,11 @@ pub fn run(
     // MQTT sink: starts log-only (unconfigured) and is (re)connected when settings change.
     let root0 = app.lock().unwrap().setup.mqtt.topic_root.clone();
     let mut sink = EspMqttSink::disconnected(root0);
+    let mut deletions =
+        telenot_app::deletions::Deletions::load(&crate::storage::NvsBlobStore(&nvs));
+    if let Err(e) = &deletions {
+        log::error!("HA-Löschjournal: {e}");
+    }
     let mut applied_mqtt: Option<MqttSettings> = None;
     let mut next_mqtt_connect_at = 0;
     let mut online_announced = false;
@@ -326,14 +331,10 @@ pub fn run(
                     mqtt.pinned_cert.as_deref(),
                     app.clone(),
                 ) {
-                    Ok(mut s) => {
-                        // The queued retained-topic clears must survive the sink swap.
-                        for topic in sink.pending_deletions() {
-                            s.queue_deletion(topic);
-                        }
+                    Ok(s) => {
                         sink = s;
                         sink.request_setup();
-                        publish_setup(&mut sink, &mqtt, &runtime, &mut last_inventory_chunks);
+
                         online_announced = false;
                         let t = crate::storage::now_ms();
                         app.lock().unwrap().ring.push(
@@ -373,7 +374,25 @@ pub fn run(
 
             online_announced = false;
         }
-        if sink.setup_ready() {
+        if let Ok(journal) = &mut deletions {
+            if let Some(entry) = journal.first() {
+                // A failed/interrupted config write may leave an intent for a live entity.
+                if (entry.still_present(runtime.config()) && !sink.deletion_in_flight())
+                    || sink.deletion_delivered()
+                {
+                    if journal
+                        .complete(&mut crate::storage::NvsBlobStore(&nvs))
+                        .is_ok()
+                    {
+                        sink.reset_deletion();
+                        sink.request_setup();
+                    }
+                } else {
+                    sink.send_deletion(&entry.topic());
+                }
+            }
+        }
+        if sink.setup_ready() && deletions.as_ref().is_ok_and(|j| j.first().is_none()) {
             publish_setup(&mut sink, &mqtt, &runtime, &mut last_inventory_chunks);
         }
         for intent in intents {
@@ -436,7 +455,20 @@ pub fn run(
                         }
                     }
                 }
-                Intent::ReloadConfig(cfg) => match cfg_store.save(&cfg) {
+                Intent::ReloadConfig(cfg) => match deletions
+                    .as_mut()
+                    .map_err(|e| e.to_string())
+                    .and_then(|journal| {
+                        journal
+                            .prepare(
+                                runtime.config(),
+                                &cfg,
+                                &mut crate::storage::NvsBlobStore(&nvs),
+                            )
+                            .map_err(|e| e.to_string())
+                    })
+                    .and_then(|()| cfg_store.save(&cfg))
+                {
                     Err(e) => {
                         // Fail-closed: do NOT apply — otherwise it looks saved but is gone
                         // after a reboot (this is exactly how a config was already lost here).
@@ -483,24 +515,10 @@ pub fn run(
                                 );
                             }
                         }
-                        // Config lives only in the core afterwards (runtime.config() borrows it) —
-                        // a third copy in the loop was part of the boot OOM.
-                        // Queue retained-entity clears ALWAYS (also while disconnected):
-                        // they ride the setup batch with retries — a one-shot publish
-                        // here would orphan HA entities across a broker outage, and the
-                        // old config is gone after reload().
-                        for topic in telenot_app::hadisco::deletion_topics(
-                            runtime.config(),
-                            &cfg,
-                            "homeassistant",
-                        ) {
-                            sink.queue_deletion(topic);
-                        }
                         runtime.reload(cfg, telenot_app::security::disarm_enabled(remote, pin_set));
                         // Align discovery/inventory with the new config (retained).
                         if sink.is_connected() {
                             sink.request_setup();
-                            publish_setup(&mut sink, &mqtt, &runtime, &mut last_inventory_chunks);
                         }
                         log::info!("Config neu geladen + persistiert");
                     }
@@ -596,7 +614,12 @@ pub fn run(
                         log::info!("Setup-Fenster per Web aufgefrischt (gedeckelt)");
                     }
                 }
-                Intent::ApplyHomekit => {
+                Intent::ApplyHomekit
+                    if matches!(
+                        app.lock().unwrap().commit_status,
+                        telenot_app::dto::CommitStatus::Saved { .. }
+                    ) =>
+                {
                     // Stage → apply (without reboot): ensure HAP is idempotently running and
                     // signal the HAP thread to reconcile the bridged accessory set against the
                     // (just persisted) config. The reconcile itself runs in the HAP thread.
@@ -730,11 +753,6 @@ fn publish_setup(
     let config = runtime.config();
     sink.begin_setup_pass();
     let mut index = 0;
-    // Queued retained-topic clears first (removed/de-switched entities): same batch,
-    // same retry semantics; cleared from the queue only after a completed pass.
-    for topic in sink.pending_deletions() {
-        sink.setup_publish(&mut index, &topic, "", true, false);
-    }
     if m.ha_discovery {
         if config.panel.kind == telenot_config::PanelKind::Hiplex8400
             && config.panel.gms_variant == telenot_config::GmsVariant::Plus
@@ -792,7 +810,6 @@ fn publish_setup(
         }
     });
     sink.end_setup_pass(index);
-    sink.clear_delivered_deletions();
     if !sink.setup_pending() {
         *last_inventory_chunks = chunks;
     }

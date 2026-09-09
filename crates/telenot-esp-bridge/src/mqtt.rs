@@ -79,9 +79,8 @@ pub struct EspMqttSink {
     connected: Arc<AtomicBool>,
     connections: Arc<AtomicU32>,
     pub publish_errors: u32,
-    /// Retained discovery topics to clear (empty payload), queued at config reload and
-    /// delivered through the setup batch so they survive disconnects and retries.
-    pending_deletions: Vec<String>,
+    /// One deletion in flight; the owner holds the persistent compact journal.
+    deletion_ack: Arc<Mutex<Option<(u32, bool)>>>,
     setup: telenot_app::mqtt::PublishBatch,
     retry: bool,
     last_retry: u64,
@@ -102,7 +101,7 @@ impl EspMqttSink {
             connected: Arc::new(AtomicBool::new(false)),
             connections: Arc::new(AtomicU32::new(0)),
             publish_errors: 0,
-            pending_deletions: Vec::new(),
+            deletion_ack: Arc::new(Mutex::new(None)),
             setup: telenot_app::mqtt::PublishBatch::default(),
             retry: false,
             last_retry: 0,
@@ -193,6 +192,8 @@ impl EspMqttSink {
         let connected_pump = Arc::clone(&connected);
         let connections = Arc::new(AtomicU32::new(0));
         let connections_pump = Arc::clone(&connections);
+        let deletion_ack = Arc::new(Mutex::new(None::<(u32, bool)>));
+        let deletion_ack_pump = deletion_ack.clone();
 
         // Event pump: MUST run, otherwise the client blocks. Signals (re)subscribe on Connect +
         // forwards command publishes as intents (the loop authorises fail-closed).
@@ -218,6 +219,20 @@ impl EspMqttSink {
                         EventPayload::Disconnected | EventPayload::Error(_) => {
                             connected_pump.store(false, Ordering::SeqCst)
                         }
+                        EventPayload::Deleted(id) => {
+                            let mut ack = deletion_ack_pump.lock().unwrap();
+                            if ack.is_some_and(|(expected, _)| expected == id) {
+                                *ack = None;
+                            }
+                        }
+                        EventPayload::Published(id) => {
+                            let mut ack = deletion_ack_pump.lock().unwrap();
+                            if let Some((expected, done)) = ack.as_mut() {
+                                if *expected == id {
+                                    *done = true;
+                                }
+                            }
+                        }
                         EventPayload::Received {
                             topic: Some(t),
                             data,
@@ -236,8 +251,7 @@ impl EspMqttSink {
                                 // The ESP wrapper does not expose the retain flag → treat as a live
                                 // command; disarm stays fail-closed via PIN + remote disarm.
                                 let panel_kind = app.lock().unwrap().persisted.panel.kind;
-                                match telenot_app::parse_command_message(data, false, panel_kind)
-                                {
+                                match telenot_app::parse_command_message(data, false, panel_kind) {
                                     Ok((cmd, pin)) => {
                                         // Route arm commands from an area topic to that area;
                                         // bypass/output are area-agnostic and pass unchanged.
@@ -280,7 +294,7 @@ impl EspMqttSink {
             connected,
             connections,
             publish_errors: 0,
-            pending_deletions: Vec::new(),
+            deletion_ack,
             setup: telenot_app::mqtt::PublishBatch::default(),
             retry: false,
             last_retry: 0,
@@ -294,20 +308,40 @@ impl EspMqttSink {
     pub fn request_setup(&mut self) {
         self.setup.restart();
     }
-    /// Queue a retained-topic clear (deduplicated); delivered in the next setup passes.
-    pub fn queue_deletion(&mut self, topic: String) {
-        if !self.pending_deletions.contains(&topic) {
-            self.pending_deletions.push(topic);
+    /// Track one QoS1 clear until the broker acknowledges its exact message ID.
+    pub fn deletion_in_flight(&self) -> bool {
+        self.deletion_ack.lock().unwrap().is_some()
+    }
+    pub fn deletion_delivered(&self) -> bool {
+        self.deletion_ack
+            .lock()
+            .unwrap()
+            .is_some_and(|(_, done)| done)
+    }
+    pub fn reset_deletion(&mut self) {
+        *self.deletion_ack.lock().unwrap() = None;
+    }
+    pub fn send_deletion(&mut self, topic: &str) {
+        if !self.is_connected() {
+            return;
         }
-    }
-    /// Stable snapshot of the queued clears for this setup pass.
-    pub fn pending_deletions(&self) -> Vec<String> {
-        self.pending_deletions.clone()
-    }
-    /// A completed setup pass has delivered every queued clear.
-    pub fn clear_delivered_deletions(&mut self) {
-        if !self.setup.pending() {
-            self.pending_deletions.clear();
+        let mut ack = self.deletion_ack.lock().unwrap();
+        // Expired outbox entries may have no Deleted event in SDK configurations.
+        // Retrying an unacknowledged empty retained publish is idempotent.
+        if ack.is_some_and(|(_, done)| !done)
+            && self
+                .client
+                .as_ref()
+                .is_some_and(|c| c.get_outbox_size() == 0)
+        {
+            *ack = None;
+        }
+        if ack.is_none() {
+            if let Some(client) = self.client.as_mut() {
+                if let Ok(id) = client.enqueue(topic, QoS::AtLeastOnce, true, b"") {
+                    *ack = Some((id, false));
+                }
+            }
         }
     }
     pub fn setup_ready(&self) -> bool {
