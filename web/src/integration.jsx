@@ -55,7 +55,8 @@ function ScreenMqtt({ ctx }) {
   const saveMqttReboot = async () => {
     if (!(ctx.live && API)) return;
     setStarting(true);
-    try { await API.putMqtt(payload()); await API.reboot(); } catch (_) { setStarting(false); }
+    try { await API.putMqtt(payload()); await API.reboot(); }
+    catch (e) { ctx.toast("err", e.message); setStarting(false); }
   };
 
   // Live: load current MQTT settings from the device (password is write-only → _pw left empty).

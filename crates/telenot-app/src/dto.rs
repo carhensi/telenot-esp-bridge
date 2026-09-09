@@ -339,6 +339,9 @@ pub struct SerialDiag {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MqttDiag {
+    pub setup_pending: bool,
+    pub publish_errors: u32,
+    pub discovery_count: usize,
     pub status: String,
     pub reconnects: u32,
     #[serde(skip_serializing_if = "Option::is_none")]

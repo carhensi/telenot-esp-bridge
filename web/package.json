@@ -8,11 +8,13 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint src",
+    "test:unit": "node --test tests/firmware-hash.test.js tests/save-config.test.js tests/sensor-edits.test.js",
     "e2e": "playwright test",
     "e2e:headed": "playwright test --headed",
     "e2e:sec": "playwright test --project=e2e"
   },
   "dependencies": {
+    "@noble/hashes": "2.4.0",
     "preact": "^10.29.8",
     "qrcode-generator": "^2.0.4"
   },

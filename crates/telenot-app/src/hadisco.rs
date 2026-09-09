@@ -313,6 +313,11 @@ pub fn discovery_for_each(config: &Config, o: &DiscoveryOpts, emit: &mut dyn FnM
             "availability": avail,
             "device": dev,
         });
+        payload["availability"] = json!([
+            {"topic": format!("{}/availability", o.topic_root), "payload_available":"online", "payload_not_available":"offline"},
+            {"topic": format!("{}/sensor/{}/availability", o.topic_root, s.topic()), "payload_available":"online", "payload_not_available":"offline"}
+        ]);
+        payload["availability_mode"] = json!("all");
         if is_diagnostic(s.kind()) {
             payload["entity_category"] = json!("diagnostic");
         }

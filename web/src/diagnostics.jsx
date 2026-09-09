@@ -2,6 +2,7 @@
 import React from 'preact/compat';
 const { useState, useEffect, useRef } = React;
 import { API } from './api.js';
+import { firmwareSha256 } from './firmware-hash.js';
 import { MOCK } from './mock.js';
 import { Button, copyText, fmtDur, fmtUptime, Icon, Modal, StatusDot } from './ui.jsx';
 
@@ -67,6 +68,7 @@ function DiagModal({ ctx, onClose, initialCapture }) {
         <div className="metric"><div className="metric__lbl">{t("s7.uptime")}</div><div className="metric__val mono">{diag.uptime_s != null ? fmtUptime(diag.uptime_s) : "—"}</div></div>
         <div className="metric"><div className="metric__lbl">{t("s7.fw")}</div><div className="metric__val mono">{dev.fw}{dev.fw_build ? ` · ${dev.fw_build}` : ""}</div></div>
       </div>
+      {diag.mqtt && <p className="muted">MQTT: {diag.mqtt.discovery_count ?? 0} bestätigte Melder · {diag.mqtt.publish_errors ?? 0} Sendefehler · {diag.mqtt.reconnects ?? 0} Wiederverbindungen{diag.mqtt.setup_pending ? " · Discovery/Zustände werden übertragen" : ""}</p>}
       <div className="card"><div className="card__head" style={{ justifyContent: "space-between" }}>
         <span className="card__title card__title--sm">{t("s7.ringlog")}</span>
         <div className="cluster">
@@ -184,8 +186,7 @@ function UpdatePanel({ ctx, setupWindowS }) {
     setErr(null); setSha(null); setFile(f);
     try {
       const buf = await f.arrayBuffer();
-      const d = await window.crypto.subtle.digest("SHA-256", buf);
-      setSha(Array.from(new Uint8Array(d)).map((b) => b.toString(16).padStart(2, "0")).join(""));
+      setSha(firmwareSha256(buf));
     } catch (e) {
       setErr("SHA-Berechnung fehlgeschlagen: " + e.message);
       setFile(null);
@@ -368,9 +369,13 @@ function CapturePanel({ ctx, initialOpen }) {
             ? <Button variant="primary" size="sm" iconLeft="spark" disabled={busy} onClick={start}>Mitschnitt starten</Button>
             : <Button variant="danger" size="sm" iconLeft="power" disabled={busy} onClick={stop}>Stoppen</Button>}
           <Button variant="secondary" size="sm" iconLeft="copy" disabled={!cap.buf_used} onClick={dl}>capture.bin herunterladen ({(cap.buf_used / 1024).toFixed(1)} KB)</Button>
+          <Button variant="secondary" size="sm" disabled={cap.active || !(cap.trace_used > 8)} onClick={() => { if (ctx.live && API) API.downloadCapture(true).catch(() => {}); }}>RX/TX-Diagnose herunterladen</Button>
         </div>
         <div style={{ fontSize: "var(--text-xs)", color: "var(--fg-subtle)" }}>
-          Nach 2–3 Minuten stoppen, Datei herunterladen und an den Entwickler schicken (Details: docs/DEBUG-CAPTURE.md).
+          {cap.hiplex_probe && <p><strong>hiplex-Lesediagnose: maximal 3 Leseabfragen</strong></p>}
+          Nach 30 Sekunden stoppen und beide Dateien herunterladen. Die RX/TX-Diagnose zeichnet den Anfang mit Zeitstempeln auf (maximal 16 KiB).
+          {" Bei ausgewählter hiplex führt der Discover-Lauf höchstens drei Leseabfragen aus: Eingangsbelegung, Ausgangsbelegung und einen Meldernamen. Dabei wird keine Sensorliste übernommen."}
+          {cap.trace_full && " Diagnosepuffer voll: Nur der Anfang wurde gespeichert. Für einen weiteren Versuch einen neuen Mitschnitt starten."}
         </div>
       </div>
       )}

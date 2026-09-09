@@ -52,3 +52,69 @@ pub trait MqttSink: Send {
     /// Synchronous connection test (runs in the worker, NEVER in the serial-owner thread).
     fn test_connection(&mut self, target: &MqttTarget) -> MqttTestResult;
 }
+
+/// Bounded streaming progress for discovery/recovery. Failed messages retain their slot.
+#[derive(Default)]
+pub struct PublishBatch {
+    cursor: usize,
+    budget: usize,
+    pending: bool,
+}
+impl PublishBatch {
+    pub fn restart(&mut self) {
+        self.cursor = 0;
+        self.pending = true;
+    }
+    pub fn pending(&self) -> bool {
+        self.pending
+    }
+    pub fn begin(&mut self) {
+        self.budget = 4;
+    }
+    pub fn accepts(&self, position: usize) -> bool {
+        self.pending && self.budget > 0 && position == self.cursor
+    }
+    pub fn complete_message(&mut self, success: bool) {
+        self.budget = self.budget.saturating_sub(1);
+        if success {
+            self.cursor += 1;
+        }
+    }
+    pub fn finish(&mut self, total: usize) {
+        self.pending = self.cursor < total;
+    }
+}
+#[cfg(test)]
+mod batch_tests {
+    use super::PublishBatch;
+    #[test]
+    fn recovery_is_bounded_and_failed_slots_are_retried() {
+        let mut b = PublishBatch::default();
+        assert!(!b.pending());
+        b.restart();
+        b.begin();
+        for i in 0..4 {
+            assert!(b.accepts(i));
+            b.complete_message(true);
+        }
+        assert!(!b.accepts(4));
+        b.finish(7);
+        assert!(b.pending());
+        b.begin();
+        assert!(!b.accepts(0));
+        assert!(b.accepts(4));
+        b.complete_message(false);
+        assert!(!b.accepts(5));
+        b.finish(7);
+        b.begin();
+        for i in 4..7 {
+            assert!(b.accepts(i));
+            b.complete_message(true);
+        }
+        b.finish(7);
+        assert!(!b.pending());
+        b.restart();
+        b.begin();
+        assert!(b.accepts(0));
+    }
+}

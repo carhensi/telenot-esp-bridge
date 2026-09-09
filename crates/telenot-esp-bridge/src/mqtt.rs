@@ -9,7 +9,7 @@
 //! - `test_connection`: one-shot probe in a worker thread (never in the serial owner).
 
 use std::net::{TcpStream, ToSocketAddrs};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -22,15 +22,30 @@ use telenot_app::app::PendingCert;
 use telenot_app::mqtt::{MqttSink, MqttTarget, MqttTestResult};
 use telenot_app::{App, Intent};
 
-/// Turns a PEM into a `'static` NUL-terminated buffer for `X509::pem_until_nul`. Intentionally
-/// leaked (the C mqtt/tls copies the cert on connect; (re)connects happen only on settings
-/// changes, i.e. rarely — the leak is negligible).
-fn leak_pem_nul(pem: &str) -> &'static [u8] {
-    let mut v = pem.as_bytes().to_vec();
-    if !v.ends_with(&[0]) {
-        v.push(0);
+/// Reuse at most two static certificates required by the SDK; bounded to 16 KiB.
+fn cached_pem_nul(pem: &str) -> Result<&'static [u8], EspError> {
+    // The SDK requires static certificates. Bound retention and reuse identical certificates.
+    static CACHE: Mutex<Vec<&'static [u8]>> = Mutex::new(Vec::new());
+    let mut cache = CACHE.lock().unwrap();
+    if let Some(&bytes) = cache
+        .iter()
+        .find(|b| b.strip_suffix(&[0]).unwrap_or(b) == pem.as_bytes())
+    {
+        return Ok(bytes);
     }
-    Box::leak(v.into_boxed_slice())
+    if pem.len() > 8192 || cache.len() >= 2 {
+        log::error!("Zertifikat-Cache voll/zu gross: vor weiterem Zertifikatswechsel neu starten");
+        return Err(EspError::from_infallible::<
+            { esp_idf_svc::sys::ESP_ERR_NO_MEM },
+        >());
+    }
+    let mut bytes = pem.as_bytes().to_vec();
+    if !bytes.ends_with(&[0]) {
+        bytes.push(0);
+    }
+    let bytes = Box::leak(bytes.into_boxed_slice());
+    cache.push(bytes);
+    Ok(bytes)
 }
 
 /// Broker URI from host/port/TLS (`mqtt://` or `mqtts://`).
@@ -61,6 +76,12 @@ fn tls_conf(conf: &mut MqttClientConfiguration, tls: bool, pinned: Option<&'stat
 /// Poll-loop MQTT sink. `client == None` = log-only (MQTT not configured).
 pub struct EspMqttSink {
     root: String,
+    connected: Arc<AtomicBool>,
+    connections: Arc<AtomicU32>,
+    pub publish_errors: u32,
+    setup: telenot_app::mqtt::PublishBatch,
+    retry: bool,
+    last_retry: u64,
     client: Option<EspMqttClient<'static>>,
     /// Set by the event pump on every Connect. Drained by [`Self::poll_resubscribe`] on the
     /// POLL-LOOP thread — subscribing from the `conn.next()` pump thread deadlocks the
@@ -75,6 +96,12 @@ impl EspMqttSink {
     pub fn disconnected(root: String) -> Self {
         Self {
             root,
+            connected: Arc::new(AtomicBool::new(false)),
+            connections: Arc::new(AtomicU32::new(0)),
+            publish_errors: 0,
+            setup: telenot_app::mqtt::PublishBatch::default(),
+            retry: false,
+            last_retry: 0,
             client: None,
             resub: Arc::new(AtomicBool::new(false)),
             cmd_topic: String::new(),
@@ -85,8 +112,9 @@ impl EspMqttSink {
     /// (Re)subscribes the command topics after a (re)connect. MUST be called from the poll loop
     /// (owner of the client), NEVER from the `conn.next()` event pump — the pump only sets the
     /// flag. This is the fix for the deadlock/"HA commands never reached the bridge" bug.
-    pub fn poll_resubscribe(&mut self) {
-        if self.resub.swap(false, Ordering::SeqCst) {
+    pub fn poll_resubscribe(&mut self) -> bool {
+        let changed = self.resub.swap(false, Ordering::SeqCst);
+        if changed {
             if let Some(c) = self.client.as_mut() {
                 let _ = c.subscribe(&self.cmd_topic, QoS::AtLeastOnce);
                 let _ = c.subscribe(&self.area_cmd_topic, QoS::AtLeastOnce);
@@ -96,6 +124,20 @@ impl EspMqttSink {
                     self.area_cmd_topic
                 );
             }
+        }
+        changed
+    }
+
+    pub fn reconnects(&self) -> u32 {
+        self.connections.load(Ordering::Relaxed).saturating_sub(1)
+    }
+    pub fn retry_due(&mut self, now: u64) -> bool {
+        if self.retry && self.is_connected() && now.saturating_sub(self.last_retry) >= 30_000 {
+            self.retry = false;
+            self.last_retry = now;
+            true
+        } else {
+            false
         }
     }
 
@@ -117,10 +159,11 @@ impl EspMqttSink {
         let lwt_topic = format!("{root}/availability");
         let cmd_topic = format!("{root}/command");
         let user = (!username.is_empty()).then_some(username);
-        let pinned = pinned_cert.map(leak_pem_nul);
+        let pinned = pinned_cert.map(cached_pem_nul).transpose()?;
 
         let mut conf = MqttClientConfiguration {
             client_id: Some("telenot-esp-bridge"),
+            outbox_limit: Some(32 * 1024),
             keep_alive_interval: Some(Duration::from_secs(15)),
             lwt: Some(LwtConfiguration {
                 topic: &lwt_topic,
@@ -142,6 +185,10 @@ impl EspMqttSink {
         // actual subscribe via `poll_resubscribe` (it owns the client).
         let resub = Arc::new(AtomicBool::new(false));
         let resub_pump = Arc::clone(&resub);
+        let connected = Arc::new(AtomicBool::new(false));
+        let connected_pump = Arc::clone(&connected);
+        let connections = Arc::new(AtomicU32::new(0));
+        let connections_pump = Arc::clone(&connections);
 
         // Event pump: MUST run, otherwise the client blocks. Signals (re)subscribe on Connect +
         // forwards command publishes as intents (the loop authorises fail-closed).
@@ -149,7 +196,7 @@ impl EspMqttSink {
         // Multi-area panels (hiplex): {root}/area/{id}/command routes arm commands to the
         // given Sicherungsbereich; same payload contract and authorization as {root}/command.
         let area_prefix = format!("{root}/area/");
-        let _ = std::thread::Builder::new()
+        let pump = std::thread::Builder::new()
             .name("mqtt-ev".into())
             // 8 KB instead of 6: TLS handshake callbacks run in this task — 6 KB was marginal
             // (a silent stack overflow would reboot without a useful log). Deliberately paying
@@ -159,7 +206,14 @@ impl EspMqttSink {
                 while let Ok(event) = conn.next() {
                     match event.payload() {
                         // Signal (re)subscribe on every (re)connect — never touch the client here.
-                        EventPayload::Connected(_) => resub_pump.store(true, Ordering::SeqCst),
+                        EventPayload::Connected(_) => {
+                            connected_pump.store(true, Ordering::SeqCst);
+                            connections_pump.fetch_add(1, Ordering::Relaxed);
+                            resub_pump.store(true, Ordering::SeqCst);
+                        }
+                        EventPayload::Disconnected | EventPayload::Error(_) => {
+                            connected_pump.store(false, Ordering::SeqCst)
+                        }
                         EventPayload::Received {
                             topic: Some(t),
                             data,
@@ -206,13 +260,25 @@ impl EspMqttSink {
                         _ => {}
                     }
                 }
+                connected_pump.store(false, Ordering::SeqCst);
                 log::info!("MQTT-Event-Pump beendet");
             });
 
+        if pump.is_err() {
+            return Err(EspError::from_infallible::<
+                { esp_idf_svc::sys::ESP_ERR_NO_MEM },
+            >());
+        }
         let area_cmd_topic = format!("{root}/area/+/command");
-        log::info!("MQTT verbunden: {url}");
+        log::info!("MQTT-Client gestartet: {url}");
         Ok(Self {
             root,
+            connected,
+            connections,
+            publish_errors: 0,
+            setup: telenot_app::mqtt::PublishBatch::default(),
+            retry: false,
+            last_retry: 0,
             client: Some(client),
             resub,
             cmd_topic,
@@ -220,21 +286,75 @@ impl EspMqttSink {
         })
     }
 
+    pub fn request_setup(&mut self) {
+        self.setup.restart();
+    }
+    pub fn setup_ready(&self) -> bool {
+        self.setup.pending()
+            && self.is_connected()
+            && self
+                .client
+                .as_ref()
+                .is_some_and(|c| c.get_outbox_size() < 4096)
+    }
+    pub fn begin_setup_pass(&mut self) {
+        self.setup.begin();
+    }
+    pub fn setup_publish(
+        &mut self,
+        index: &mut usize,
+        topic: &str,
+        payload: &str,
+        retain: bool,
+        relative: bool,
+    ) {
+        let position = *index;
+        *index += 1;
+        if !self.setup.accepts(position) || !self.is_connected() {
+            return;
+        }
+        let errors = self.publish_errors;
+        if relative {
+            self.publish(topic, payload, retain);
+        } else {
+            self.publish_raw(topic, payload, retain);
+        }
+        self.setup
+            .complete_message(self.publish_errors == errors && self.is_connected());
+    }
+    pub fn end_setup_pass(&mut self, total: usize) {
+        self.setup.finish(total);
+    }
+
+    pub fn setup_pending(&self) -> bool {
+        self.setup.pending()
+    }
+
     pub fn is_connected(&self) -> bool {
-        self.client.is_some()
+        self.connected.load(Ordering::SeqCst)
     }
 }
 
 impl MqttSink for EspMqttSink {
     fn publish(&mut self, topic: &str, payload: &str, retain: bool) {
-        if let Some(c) = self.client.as_mut() {
-            let full = format!("{}/{topic}", self.root);
-            let _ = c.enqueue(&full, QoS::AtLeastOnce, retain, payload.as_bytes());
-        }
+        self.publish_raw(&format!("{}/{topic}", self.root), payload, retain);
     }
     fn publish_raw(&mut self, topic: &str, payload: &str, retain: bool) {
+        if !self.is_connected() {
+            self.retry = true;
+            return;
+        }
         if let Some(c) = self.client.as_mut() {
-            let _ = c.enqueue(topic, QoS::AtLeastOnce, retain, payload.as_bytes());
+            if let Err(e) = c.enqueue(topic, QoS::AtLeastOnce, retain, payload.as_bytes()) {
+                self.publish_errors = self.publish_errors.saturating_add(1);
+                self.retry = true;
+                if self.publish_errors == 1 || self.publish_errors.is_power_of_two() {
+                    log::warn!(
+                        "MQTT-Publish fehlgeschlagen: {e} ({} Fehler)",
+                        self.publish_errors
+                    );
+                }
+            }
         }
     }
     fn test_connection(&mut self, target: &MqttTarget) -> MqttTestResult {
@@ -255,7 +375,10 @@ fn mqtt_connect_ok(t: &MqttTarget) -> bool {
         password: t.password.as_deref().filter(|_| user.is_some()),
         ..Default::default()
     };
-    let pinned = t.pinned_cert.as_deref().map(leak_pem_nul);
+    let pinned = match t.pinned_cert.as_deref().map(cached_pem_nul).transpose() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
     tls_conf(&mut conf, t.tls, pinned);
     let (_client, mut conn) = match EspMqttClient::new(&url, &conf) {
         Ok(v) => v,

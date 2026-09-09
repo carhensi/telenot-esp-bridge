@@ -687,6 +687,10 @@ pub struct App {
     /// Actual MQTT connection state (mirrored from the sink). Replaces the plain "tested"
     /// flag in diagnostics.
     pub mqtt_connected: bool,
+    pub mqtt_publish_errors: u32,
+    pub mqtt_setup_pending: bool,
+    pub mqtt_reconnects: u32,
+    pub mqtt_discovery_count: usize,
     /// Firmware heap in bytes `(free, largest_free_block, low_watermark)`. `None` on the host.
     pub heap: Option<(u64, u64, u64)>,
     /// Reset reason of the last boot (esp_reset_reason, e.g. "poweron"/"panic"/"task_wdt").
@@ -737,6 +741,10 @@ impl App {
             session: None,
             csrf: None,
             mqtt_connected: false,
+            mqtt_publish_errors: 0,
+            mqtt_setup_pending: false,
+            mqtt_reconnects: 0,
+            mqtt_discovery_count: 0,
             heap: None,
             boot_reason: "unknown",
             boot_count: 0,
