@@ -19,15 +19,11 @@ updates:
       cargo-minor-patch:
         update-types: [minor, patch]
 
-  # Firmware-Crate ist ein eigener Workspace (xtensa). Achtung bei esp-idf-sys/esp-idf-svc:
-  # Bumps hier nur mergen, wenn die Firmware lokal warning-frei baut (CI baut xtensa nicht).
-  - package-ecosystem: cargo
-    directory: /crates/telenot-esp-bridge
-    schedule:
-      interval: weekly
-    groups:
-      esp-minor-patch:
-        update-types: [minor, patch]
+  # Firmware-Crate (eigener xtensa-Workspace) ist bewusst NICHT mehr dabei:
+  # Dependabot kann den espup-Toolchain "esp" aus rust-toolchain.toml nicht
+  # installieren und schlug deshalb bei jedem Lauf fehl. Bumps dort passieren
+  # manuell — ohnehin nur mergen, wenn die Firmware lokal warning-frei baut
+  # (CI baut xtensa nicht); cargo-audit im Security-Workflow prüft das Lockfile weiter.
 
   - package-ecosystem: npm
     directory: /web
