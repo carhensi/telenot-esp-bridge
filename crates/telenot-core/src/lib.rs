@@ -47,6 +47,12 @@ pub const PENDING_MAX_AGE_MS: Tick = 3 * POLL_INTERVAL_MS;
 /// risky pause right after a panel burst — that window collided reproducibly on the real panel.
 /// Tunable after a capture; a collision/no-ACK still falls back to the reliable slot.
 pub const EAGER_IDLE_GUARD_MS: Tick = 400;
+/// Window after a command resolved with `OK` during which a trailing 0x11 error record is
+/// still attributed to that command. Observed on a real hiplex GMS plus: the panel ACKs the
+/// command telegram and reports `0x18 Funktion nicht möglich` only in a LATER SEND_NDAT —
+/// without this window the error would be filtered as discovery noise and the published
+/// `OK` would stand uncorrected. Two poll cycles cover the next status telegram with margin.
+pub const LATE_FEHLER_WINDOW_MS: Tick = 2 * POLL_INTERVAL_MS;
 
 /// Canonical **complex 400H** area-status addresses (verified via pcap).
 /// Legacy aliases of [`COMPLEX400`] — the profile is the source of truth
@@ -59,6 +65,11 @@ pub const ADDR_ALARM: u16 = 0x0533;
 /// Active = panel is ready to arm (all relevant contacts closed).
 pub const ADDR_INTERN_BEREIT: u16 = 0x0535;
 pub const ADDR_EXTERN_BEREIT: u16 = 0x0536;
+/// hiplex GMS plus readiness bits, area 1 (Satz 0x24, Gerät 0, Erweiterung 0x02, aktiv-low).
+/// Verified 2026-10 on a real 8400 via capture + keypad cross-check (community test): a
+/// tripped contact clears both bits, an internally bypassed detector only the external one.
+pub const HIPLEX_PLUS_INTERN_BEREIT: u16 = 0x0505;
+pub const HIPLEX_PLUS_EXTERN_BEREIT: u16 = 0x0506;
 /// Base address for "detection area N bypassed": 0x05F0 + (N-1), N = 1…128.
 pub const ADDR_MB_GESPERRT: u16 = 0x05F0;
 /// Maximum detection area number on the complex (detection areas 1–128).
@@ -196,6 +207,10 @@ pub struct Core {
     pending: Option<Pending>,
     /// Sent command awaiting CONFIRM_ACK (collision handling + ACK timeout).
     in_flight: Option<InFlight>,
+    /// Last command resolved with `OK` (+ timestamp): a 0x11 error record arriving within
+    /// [`LATE_FEHLER_WINDOW_MS`] afterwards is attributed to it instead of being filtered
+    /// as discovery noise (hiplex GMS plus rejects AFTER the ACK, in the next SEND_NDAT).
+    last_ok: Option<(TxCmd, Tick)>,
 }
 
 /// Internal: what goes over the wire as a transaction — an authorized arm command or a
@@ -294,6 +309,7 @@ impl Core {
             recovery_count: 0,
             pending: None,
             in_flight: None,
+            last_ok: None,
         }
     }
 
@@ -360,14 +376,40 @@ impl Core {
         let mut had_fehler = false;
         for rec in frame.records().filter_map(|r| r.ok()) {
             if let Some(f) = rec.as_fehler() {
-                // "No detection point here" WITHOUT a command in flight is a normal
-                // discovery text-query response (an address the 0x24 occupancy scan
-                // flagged occupied but that has no physical component) — not a rejected
-                // command. Discovery queries bypass `in_flight`/`pending` entirely (sent
-                // directly via Action::SendFrame from the scan runner), so this can never
-                // suppress the report for a genuine command rejection.
-                if f.fehlercode.is_not_occupied() && self.in_flight.is_none() {
-                    continue;
+                if self.in_flight.is_none() {
+                    // Late rejection: the panel ACKed our command (transaction already
+                    // resolved, `OK` published) and reports the 0x11 error only in a LATER
+                    // telegram — observed on hiplex GMS plus (ACK, then 0x18 in the next
+                    // SEND_NDAT). Attribute it to the just-resolved command; the FEHLER
+                    // result supersedes the earlier OK.
+                    let late = match self.last_ok {
+                        Some((cmd, at)) if now.saturating_sub(at) <= LATE_FEHLER_WINDOW_MS => {
+                            Some(cmd)
+                        }
+                        _ => None,
+                    };
+                    if let Some(cmd) = late {
+                        self.last_ok = None;
+                        actions.push(command_result(format!(
+                            "FEHLER {:?} ({} nach Quittung abgelehnt)",
+                            f.fehlercode,
+                            cmd.label()
+                        )));
+                        actions.push(Action::Log(format!(
+                            "Zentrale meldete nach der Quittung einen Fehlersatz für {}: {:?}",
+                            cmd.label(),
+                            f.fehlercode
+                        )));
+                        continue;
+                    }
+                    // "No detection point here" WITHOUT a (recent) command is a normal
+                    // discovery text-query response (an address the 0x24 occupancy scan
+                    // flagged occupied but that has no physical component) — not a
+                    // rejected command. Discovery queries bypass `in_flight`/`pending`
+                    // entirely (sent directly via Action::SendFrame from the scan runner).
+                    if f.fehlercode.is_not_occupied() {
+                        continue;
+                    }
                 }
                 had_fehler = true;
                 actions.push(command_result(format!("FEHLER {:?}", f.fehlercode)));
@@ -382,7 +424,7 @@ impl Core {
             Some(Function::SendNorm) => {
                 // Panel SEND while our command is unacknowledged = collision;
                 // our telegram was ignored → re-queue (bounded).
-                self.requeue_on_collision(now, &mut actions);
+                self.requeue_on_collision(now, had_fehler, &mut actions);
                 // FT1.2 send discipline: the SEND_NORM poll window is the RELIABLE send slot
                 // of the real panel (confirmed by Discovery queries responding the same way).
                 // The pure command window after the output telegram collided
@@ -393,7 +435,7 @@ impl Core {
                 }
             }
             Some(Function::SendNdat) => {
-                self.requeue_on_collision(now, &mut actions);
+                self.requeue_on_collision(now, had_fehler, &mut actions);
                 actions.push(ack());
                 let outputs_seen = self.process_records(frame, &mut actions);
                 // Command window: only in the pause AFTER the second status telegram
@@ -733,6 +775,8 @@ impl Core {
         if let Some(inf) = self.in_flight.take() {
             fail_command(inf.cmd, "Serial offline — Befehl verworfen", actions);
         }
+        // After a serial outage nothing arriving later may be attributed to an old command.
+        self.last_ok = None;
         // Invalidate cache: after recovery the fresh snapshot must republish everything.
         // Otherwise HA would stay stuck on the retained `state=unavailable` if the area
         // returns to the same arm state (new == cached → no publish).
@@ -783,11 +827,20 @@ impl Core {
 
     /// Collision resolution: if the GMS receives a panel SEND while our command is
     /// unacknowledged, the panel telegram had priority — ours is considered discarded and
-    /// re-queued (bounded).
-    fn requeue_on_collision(&mut self, now: Tick, actions: &mut Vec<Action>) {
+    /// re-queued (bounded). Exception: a SEND that itself carries a 0x11 error record is a
+    /// REJECTION of our command, not a lost telegram — re-sending would loop send→error
+    /// forever (the FEHLER command_result is already published by the on_frame scan).
+    fn requeue_on_collision(&mut self, now: Tick, had_fehler: bool, actions: &mut Vec<Action>) {
         let Some(inf) = self.in_flight.take() else {
             return;
         };
+        if had_fehler {
+            actions.push(Action::Log(format!(
+                "Befehl {} von der Zentrale abgelehnt (Fehlersatz) — kein Neuversuch",
+                inf.cmd.label()
+            )));
+            return;
+        }
         if inf.attempts >= COMMAND_MAX_ATTEMPTS {
             fail_command(inf.cmd, "Kollision, Versuche erschöpft", actions);
         } else {
@@ -822,6 +875,9 @@ impl Core {
                 inf.cmd.label()
             )));
         } else if ack {
+            // Remember the resolved command briefly: hiplex GMS plus can reject AFTER the
+            // ACK via a 0x11 record in the next SEND_NDAT (see LATE_FEHLER_WINDOW_MS).
+            self.last_ok = Some((inf.cmd, now));
             actions.push(command_result(format!("OK {}", inf.cmd.label())));
             // Latency breakdown goes to the diagnostic log only (UI stays clean):
             // window = wait for the panel's send window (protocol, avg ~1 s),
@@ -882,8 +938,12 @@ impl Core {
         }
     }
 
-    /// Read-only mapping verified by independent status snapshots and manual panel events.
-    /// Keep the command profile untouched; only area 1 has been observed on GMS Plus.
+    /// Read-only mapping verified by independent status snapshots and manual panel events:
+    /// mode bits 0x0500–0x0503 plus the readiness bits 0x0505/0x0506 (capture + keypad
+    /// cross-check, 2026-10). Keep the command profile untouched; only area 1 has been
+    /// observed on GMS Plus, and BOTH write-address candidates were rejected by a real
+    /// panel (0x0530 block → 0x11/0x10 "Adresse außerhalb"; 0x0500 block → ACK followed
+    /// by 0x11/0x18 "Funktion nicht möglich") — commands stay gated.
     fn apply_hiplex_area(&mut self, bs: &BlockStatus, actions: &mut Vec<Action>) {
         if bs.adresserweiterung != 2 {
             return;
@@ -918,6 +978,30 @@ impl Core {
                 actions.push(Action::Publish {
                     topic: topic.into(),
                     payload: state.as_str().into(),
+                    retain: true,
+                });
+            }
+        }
+        // Readiness bits (verified, aktiv-low): same change-only publish semantics as
+        // `update_readiness`, fixed to area 1 / the multi-area topic shape (the hiplex
+        // HA discovery only creates `area/1/ready/*` entities). This also feeds the
+        // pre-arm gate in `flush_pending` — without it every arm would be REJECTED.
+        for (addr, suffix) in [
+            (HIPLEX_PLUS_INTERN_BEREIT, "intern"),
+            (HIPLEX_PLUS_EXTERN_BEREIT, "extern"),
+        ] {
+            let ready = bs.is_active(addr);
+            let entry = self.areas.entry(1).or_default();
+            let slot = if suffix == "intern" {
+                &mut entry.intern_bereit
+            } else {
+                &mut entry.extern_bereit
+            };
+            if *slot != ready {
+                *slot = ready;
+                actions.push(Action::Publish {
+                    topic: format!("area/1/ready/{suffix}"),
+                    payload: if ready == Some(true) { "yes" } else { "no" }.into(),
                     retain: true,
                 });
             }
@@ -1054,7 +1138,9 @@ impl Core {
         self.check_panel_plausibility(bs, actions);
         if self.hiplex_plus() {
             self.apply_hiplex_area(bs, actions);
-            return; // Unverified readiness/MB offsets must not be interpreted as real states.
+            // Mode + readiness are handled above (verified); the profile-derived MB
+            // offsets remain unverified and must not be interpreted as real states.
+            return;
         }
         // Derive arm state + arm readiness per area from blocks that contain area status.
         let count = self.profile.areas.count;

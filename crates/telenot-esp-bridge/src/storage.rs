@@ -70,15 +70,25 @@ pub(crate) fn now_ms() -> u64 {
     (unsafe { esp_idf_svc::sys::esp_timer_get_time() } / 1000) as u64
 }
 
-fn random_bytes(buf: &mut [u8]) {
+/// Fill with hardware entropy. Without active WiFi/BT (this device is Ethernet-only)
+/// `esp_fill_random` degrades to a weak PRNG — session/CSRF tokens and PBKDF2 salts must
+/// not come from that. The SAR-ADC entropy source is therefore enabled around the fill
+/// (same measure as the HomeKit setup-code generation; Ethernet uses no ADC, so toggling
+/// is harmless). The lock serializes concurrent callers so one thread's `disable` cannot
+/// degrade another thread's in-progress fill.
+pub(crate) fn secure_random(buf: &mut [u8]) {
+    static RANDOM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = RANDOM_LOCK.lock().unwrap();
     unsafe {
-        esp_idf_svc::sys::esp_fill_random(buf.as_mut_ptr() as *mut core::ffi::c_void, buf.len())
+        esp_idf_svc::sys::bootloader_random_enable();
+        esp_idf_svc::sys::esp_fill_random(buf.as_mut_ptr() as *mut core::ffi::c_void, buf.len());
+        esp_idf_svc::sys::bootloader_random_disable();
     }
 }
 
 fn hash_secret(secret: &str) -> Result<String, String> {
     let mut salt = [0u8; 16];
-    random_bytes(&mut salt);
+    secure_random(&mut salt);
     let salt = SaltString::encode_b64(&salt).map_err(|e| e.to_string())?;
     let params = Params {
         rounds: PBKDF2_ROUNDS,
@@ -127,8 +137,15 @@ impl PersistLock {
     }
 
     fn persist(&self, nvs: &EspDefaultNvs) {
-        let _ = nvs.set_u32(self.fails_key, self.fails);
-        let _ = nvs.set_u64(self.until_key, self.locked_until_ms);
+        // The lockout only survives a reboot if these writes land — a silent failure would
+        // quietly void the persistent brute-force protection. The auth path cannot abort
+        // on a storage error (fail-closed would lock everyone out), so: log loudly.
+        if let Err(e) = nvs.set_u32(self.fails_key, self.fails) {
+            log::error!("NVS: Lockout-Zähler ({}) nicht persistiert: {e}", self.fails_key);
+        }
+        if let Err(e) = nvs.set_u64(self.until_key, self.locked_until_ms) {
+            log::error!("NVS: Lockout-Fenster ({}) nicht persistiert: {e}", self.until_key);
+        }
     }
 
     fn locked_for(&self, now: u64) -> Option<u64> {
@@ -167,11 +184,19 @@ impl NvsServices {
         if get_str(&nvs, K_PW_HASH).is_none() {
             match hash_secret(initial_password) {
                 Ok(h) => {
-                    let _ = nvs.set_str(K_PW_HASH, &h);
-                    let _ = nvs.set_u32(K_PW_CHANGED, 0);
-                    log::info!("NVS: Erst-Init — Initialpasswort hinterlegt");
+                    // A failed write stays fail-closed (no hash → no login possible),
+                    // but must be visible — the device would look bricked otherwise.
+                    match nvs
+                        .set_str(K_PW_HASH, &h)
+                        .and_then(|_| nvs.set_u32(K_PW_CHANGED, 0))
+                    {
+                        Ok(_) => log::info!("NVS: Erst-Init — Initialpasswort hinterlegt"),
+                        Err(e) => {
+                            log::error!("NVS: Initialpasswort nicht speicherbar: {e} — Login bleibt gesperrt (fail-closed)")
+                        }
+                    }
                 }
-                Err(e) => log::error!("Argon2-Hash (Initialpasswort) fehlgeschlagen: {e}"),
+                Err(e) => log::error!("PBKDF2-Hash (Initialpasswort) fehlgeschlagen: {e}"),
             }
         }
         let login_lock = PersistLock::load(&nvs, K_LL_FAILS, K_LL_UNTIL, LOGIN_LOCK_MS);
@@ -193,7 +218,7 @@ impl Services for NvsServices {
     fn new_token(&mut self) -> String {
         self.token_counter += 1;
         let mut rnd = [0u8; 16];
-        random_bytes(&mut rnd);
+        secure_random(&mut rnd);
         let mut s = String::with_capacity(32);
         for b in rnd {
             s.push_str(&format!("{b:02x}"));
@@ -268,8 +293,8 @@ impl Services for NvsServices {
         }
     }
 
-    fn set_mqtt_password(&mut self, pw: &str) {
-        let _ = self.nvs.set_str(K_MQTT_PW, pw);
+    fn set_mqtt_password(&mut self, pw: &str) -> Result<(), String> {
+        self.nvs.set_str(K_MQTT_PW, pw).map_err(|e| e.to_string())
     }
 
     fn mqtt_password_set(&self) -> bool {
@@ -538,7 +563,11 @@ pub fn load_remote_disarm(nvs: &EspDefaultNvs) -> bool {
 }
 
 pub fn save_remote_disarm(nvs: &EspDefaultNvs, on: bool) {
-    let _ = nvs.set_u8(K_REMOTE_DISARM, on as u8);
+    if let Err(e) = nvs.set_u8(K_REMOTE_DISARM, on as u8) {
+        // Not persisted = after the next reboot the switch is OFF again (fail-closed) —
+        // harmless security-wise, but confusing, so make it visible.
+        log::error!("NVS: Remote-Disarm-Schalter nicht persistiert: {e} — nach Reboot gilt AUS");
+    }
 }
 
 /// Daily update check (default ON — outbound only, installation is manual).

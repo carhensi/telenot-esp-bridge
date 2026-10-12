@@ -651,10 +651,17 @@ pub fn run(
             }
             Ok(None) => {
                 log::warn!("Panel-Transport geschlossen (EOF) — beende Loop-Iteration, warte");
+                // tick() MUST keep running without RX: it drives the offline fail-safe
+                // (availability→offline, sensor deadlines, pending-command expiry).
+                // Without it a dead transport leaves the bridge "online" forever.
+                let acts = runtime.tick(now);
+                apply_actions(acts, transport.as_mut(), &mut sink, &nvs, &app);
                 FreeRtos::delay_ms(1000);
             }
             Err(e) => {
                 log::error!("EMA-Lesefehler: {e}");
+                let acts = runtime.tick(now);
+                apply_actions(acts, transport.as_mut(), &mut sink, &nvs, &app);
                 FreeRtos::delay_ms(1000);
             }
         }

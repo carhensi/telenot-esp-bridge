@@ -4,7 +4,8 @@
 use telenot_config::{Config, Polarity, Sensor, SensorKind, CURRENT_SCHEMA_VERSION};
 use telenot_core::{
     Action, ArmCommand, ArmState, Availability, Core, CoreOptions, Tick, COMMAND_ACK_TIMEOUT_MS,
-    COMMAND_MAX_ATTEMPTS, EAGER_IDLE_GUARD_MS, RECOVERY_FRAMES, SERIAL_DEADLINE_MS,
+    COMMAND_MAX_ATTEMPTS, EAGER_IDLE_GUARD_MS, LATE_FEHLER_WINDOW_MS, RECOVERY_FRAMES,
+    SERIAL_DEADLINE_MS,
 };
 use telenot_protocol::{
     encode_command_02, encode_frame, satztyp, Frame, FrameDecoder, C_SEND_NDAT, ERW_AUSGAENGE,
@@ -545,6 +546,72 @@ fn fehler_not_occupied_with_in_flight_command_is_still_reported() {
     assert!(
         published(&a, "command_result").is_some_and(|p| p.contains("NichtBelegt")),
         "genuine in-flight rejection is still reported"
+    );
+}
+
+const FEHLER_FUNKTION_NICHT_MOEGLICH: u8 = 0x18;
+
+#[test]
+fn fehler_after_ack_within_window_supersedes_ok() {
+    // Real hiplex GMS plus behavior: the panel ACKs the command (→ OK published) and
+    // rejects it only in the NEXT telegram via 0x11/0x18. The late error must be
+    // attributed to the command instead of being filtered as discovery noise.
+    let mut c = core(true);
+    c.on_command(0, ArmCommand::ArmHome);
+    c.on_frame(0, &decode(READY_DISARMED));
+    let a = c.on_frame(100, &panel_ack());
+    assert!(published(&a, "command_result").is_some_and(|p| p.starts_with("OK ArmHome")));
+    let a = c.on_frame(
+        600,
+        &fehler_frame(C_SEND_NDAT, FEHLER_FUNKTION_NICHT_MOEGLICH),
+    );
+    let p = published(&a, "command_result").expect("late rejection must be visible");
+    assert!(
+        p.contains("FEHLER FunktionNichtMoeglich") && p.contains("ArmHome"),
+        "attributed to the command: {p}"
+    );
+    // One-shot: the same error later must not repeat the attribution.
+    let a = c.on_frame(
+        700,
+        &fehler_frame(C_SEND_NDAT, FEHLER_FUNKTION_NICHT_MOEGLICH),
+    );
+    assert!(published(&a, "command_result").is_none());
+}
+
+#[test]
+fn fehler_after_window_expiry_stays_filtered() {
+    // Past the window the discovery-noise filter applies again (0x18/0x19 without a
+    // command are normal text-query responses).
+    let mut c = core(true);
+    c.on_command(0, ArmCommand::ArmHome);
+    c.on_frame(0, &decode(READY_DISARMED));
+    c.on_frame(100, &panel_ack());
+    let late = 100 + LATE_FEHLER_WINDOW_MS + 1;
+    let a = c.on_frame(late, &fehler_frame(C_SEND_NDAT, FEHLER_NICHT_BELEGT));
+    assert!(
+        published(&a, "command_result").is_none(),
+        "stale OK must not swallow discovery responses into bogus rejections"
+    );
+}
+
+#[test]
+fn fehler_during_in_flight_is_rejection_not_collision() {
+    // A SEND_NDAT carrying 0x11 while our command is unacknowledged is a rejection —
+    // the old collision handling re-queued and re-sent the rejected command (ACK→error
+    // loop). Expect: FEHLER published, NO re-send on the next command window.
+    let mut c = core(true);
+    c.on_command(0, ArmCommand::ArmHome);
+    let a = c.on_frame(0, &decode(READY_DISARMED));
+    assert!(has_send(&a, &encoded(0x0531, 0x62)));
+    let a = c.on_frame(100, &fehler_frame(C_SEND_NDAT, 0x10));
+    assert!(
+        published(&a, "command_result").is_some_and(|p| p.contains("AdresseAusserhalb")),
+        "rejection visible"
+    );
+    let a = c.on_frame(3_100, &decode(READY_DISARMED));
+    assert!(
+        !has_send(&a, &encoded(0x0531, 0x62)),
+        "rejected command must not be re-sent"
     );
 }
 

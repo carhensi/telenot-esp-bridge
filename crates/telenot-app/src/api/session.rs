@@ -63,7 +63,8 @@ pub(super) fn handle_set_password(app: &mut App, req: &ApiRequest) -> ApiRespons
     }
     // Rotating an existing password requires the current one (re-authentication).
     // This is skipped on the first-boot mandatory change: the login already proved the initial password.
-    if !app.services.password_change_required() {
+    let rotation = !app.services.password_change_required();
+    if rotation {
         let current = body.current_password.as_deref().unwrap_or("");
         if !app.services.verify_login(current) {
             return err(403, "current_password_invalid", "Aktuelles Passwort falsch");
@@ -75,6 +76,14 @@ pub(super) fn handle_set_password(app: &mut App, req: &ApiRequest) -> ApiRespons
             "storage_failed",
             "Passwort konnte nicht gespeichert werden",
         );
+    }
+    if rotation {
+        // Rotation invalidates the existing session/CSRF pair — a stolen cookie must not
+        // survive a password change; the client re-authenticates with the new password
+        // (next API call → 401 → login screen). The first-boot mandatory change stays
+        // seamless: that session was just created by the login with the initial password.
+        app.session = None;
+        app.csrf = None;
     }
     ApiResponse::empty(204)
 }

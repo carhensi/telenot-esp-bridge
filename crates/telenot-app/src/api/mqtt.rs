@@ -48,8 +48,12 @@ pub(super) fn handle_put(app: &mut App, req: &ApiRequest) -> ApiResponse {
                 app.intents.push(Intent::StartHomekit);
             }
             if let Some(pw) = p.password {
-                if !pw.is_empty() {
-                    app.services.set_mqtt_password(&pw);
+                if !pw.is_empty() && app.services.set_mqtt_password(&pw).is_err() {
+                    return err(
+                        500,
+                        "storage_failed",
+                        "MQTT-Passwort konnte nicht gespeichert werden",
+                    );
                 }
             }
             app.setup.mqtt_tested = false;

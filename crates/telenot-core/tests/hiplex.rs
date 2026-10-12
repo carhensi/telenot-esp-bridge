@@ -293,9 +293,27 @@ fn plus_snapshot_sequence_latches_alarm_until_reset() {
         assert!(!actions
             .iter()
             .any(|a| matches!(a, Action::SendFrame(f) if f.len() > 8)));
-        assert!(!publishes(&actions)
+        let pubs = publishes(&actions);
+        // Readiness bits 0x0505/0x0506 (aktiv-low, verified on a real panel) are decoded;
+        // MB offsets stay unverified and silent. Topics use the multi-area shape only.
+        let area = core.area_states().get(&1).unwrap();
+        assert_eq!(
+            area.intern_bereit,
+            Some((byte >> 5) & 1 == 0),
+            "byte {byte:#04x}"
+        );
+        assert_eq!(
+            area.extern_bereit,
+            Some((byte >> 6) & 1 == 0),
+            "byte {byte:#04x}"
+        );
+        if i == 0 {
+            assert!(pubs.iter().any(|(t, _)| t == "area/1/ready/intern"));
+            assert!(pubs.iter().any(|(t, _)| t == "area/1/ready/extern"));
+        }
+        assert!(!pubs
             .iter()
-            .any(|(t, _)| t.contains("ready") || t.starts_with("mb/")));
+            .any(|(t, _)| t.starts_with("ready/") || t.starts_with("mb/")));
     }
     assert_eq!(
         HIPLEX8400.addr_unscharf(1),

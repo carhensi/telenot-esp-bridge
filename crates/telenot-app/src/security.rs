@@ -50,8 +50,9 @@ pub trait Services: Send {
     /// this, never a plaintext comparison.
     fn verify_pin(&mut self, pin: &str) -> PinCheck;
 
-    /// Set the MQTT broker password (write-only towards the client).
-    fn set_mqtt_password(&mut self, pw: &str);
+    /// Set the MQTT broker password (write-only towards the client). `Err` on a storage
+    /// failure (e.g. NVS write) — callers must surface this rather than reporting success.
+    fn set_mqtt_password(&mut self, pw: &str) -> Result<(), String>;
     fn mqtt_password_set(&self) -> bool;
     /// Internal read of the MQTT password ONLY for connecting/testing — never included in an
     /// HTTP response (the device must know its own broker password to connect).
@@ -225,8 +226,9 @@ impl Services for InMemoryServices {
             PinCheck::Wrong
         }
     }
-    fn set_mqtt_password(&mut self, pw: &str) {
+    fn set_mqtt_password(&mut self, pw: &str) -> Result<(), String> {
         self.mqtt_password = Some(pw.to_string());
+        Ok(())
     }
     fn mqtt_password_set(&self) -> bool {
         self.mqtt_password.is_some()
