@@ -58,8 +58,11 @@ jobs:
         run: cargo audit --file crates/telenot-esp-bridge/Cargo.lock
 
   # Das Web-Bundle wird per include_bytes! in die Firmware eingebettet — npm-Vulns
-  # wandern also mit aufs Gerät. Fail ab "high" (moderate wäre Hobby-Projekt-Rauschen;
-  # Dependabot hält die Deps ohnehin wöchentlich aktuell).
+  # in RUNTIME-Deps wandern also mit aufs Gerät, daher --omit=dev: Build-Tooling
+  # (vite/eslint/…) läuft nie auf dem Gerät, und braces (dev-Kette via
+  # vite-plugin-singlefile, GHSA-vfj7-8cjw-p6xm) hat keine gepatchte Version —
+  # ohne --omit=dev wäre der Job dauerhaft rot. Fail ab "high" (moderate wäre
+  # Hobby-Projekt-Rauschen; Dependabot hält die Deps ohnehin wöchentlich aktuell).
   npm-audit:
     name: npm audit (web)
     runs-on: ubuntu-latest
@@ -71,7 +74,7 @@ jobs:
         with:
           node-version: 22
       - name: Audit
-        run: npm --prefix web audit --audit-level=high
+        run: npm --prefix web audit --audit-level=high --omit=dev
 
   # Kurzer Fuzz-Lauf über die untrusted-Input-Parser (GMS-Frames, VdS-Sätze,
   # HTTP-JSON-DTOs). 60 s je Target auf PR/Push; im Weekly-Cron 10 min je Target.
