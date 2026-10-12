@@ -20,10 +20,10 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@playwright/test": "^1.63.0",
-    "eslint": "^10.10.0",
+    "@playwright/test": "^1.64.0",
+    "eslint": "^10.12.0",
     "eslint-plugin-react-hooks": "^7.1.1",
-    "vite": "^8.2.2",
+    "vite": "^8.3.4",
     "vite-plugin-singlefile": "^2.3.3"
   }
 }
