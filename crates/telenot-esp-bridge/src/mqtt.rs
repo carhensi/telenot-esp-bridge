@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use esp_idf_svc::mqtt::client::{
-    EspMqttClient, EventPayload, LwtConfiguration, MqttClientConfiguration, QoS,
+    Details, EspMqttClient, EventPayload, LwtConfiguration, MqttClientConfiguration, QoS,
 };
 use esp_idf_svc::sys::EspError;
 use esp_idf_svc::tls::X509;
@@ -89,6 +89,8 @@ pub struct EspMqttSink {
     /// POLL-LOOP thread — subscribing from the `conn.next()` pump thread deadlocks the
     /// esp-idf-svc client, so the pump only signals and the loop does the subscribe.
     resub: Arc<AtomicBool>,
+    /// Retained wipe sent, subscribe pending (phase 2 of [`Self::poll_resubscribe`]).
+    resub_wiped: bool,
     cmd_topic: String,
     area_cmd_topic: String,
 }
@@ -107,6 +109,7 @@ impl EspMqttSink {
             last_retry: 0,
             client: None,
             resub: Arc::new(AtomicBool::new(false)),
+            resub_wiped: false,
             cmd_topic: String::new(),
             area_cmd_topic: String::new(),
         }
@@ -115,9 +118,29 @@ impl EspMqttSink {
     /// (Re)subscribes the command topics after a (re)connect. MUST be called from the poll loop
     /// (owner of the client), NEVER from the `conn.next()` event pump — the pump only sets the
     /// flag. This is the fix for the deadlock/"HA commands never reached the bridge" bug.
+    ///
+    /// Two phases per (re)connect: **first** wipe any retained message off the command
+    /// topics (empty retained publish), **then** — one poll iteration later — subscribe.
+    /// The broker replays retained publishes on every new subscription, and the ESP event
+    /// API does not expose the incoming retain flag — so a retained arm/disarm stored at
+    /// the broker would execute on every reconnect (MQTT-CONTRACT: retain=false is
+    /// mandatory). Wiping before subscribing enforces the contract broker-side; the poll
+    /// gap gives the QoS1 wipes time to land before the SUBSCRIBE.
     pub fn poll_resubscribe(&mut self) -> bool {
-        let changed = self.resub.swap(false, Ordering::SeqCst);
-        if changed {
+        if self.resub.swap(false, Ordering::SeqCst) {
+            if let Some(c) = self.client.as_mut() {
+                let _ = c.enqueue(&self.cmd_topic, QoS::AtLeastOnce, true, &[]);
+                for id in 1..=telenot_config::AREA_ID_MAX {
+                    let topic = format!("{}/area/{id}/command", self.root);
+                    let _ = c.enqueue(&topic, QoS::AtLeastOnce, true, &[]);
+                }
+                log::info!("MQTT: retained Commands geleert (vor Subscribe)");
+            }
+            self.resub_wiped = true;
+            return false;
+        }
+        if self.resub_wiped {
+            self.resub_wiped = false;
             if let Some(c) = self.client.as_mut() {
                 let _ = c.subscribe(&self.cmd_topic, QoS::AtLeastOnce);
                 let _ = c.subscribe(&self.area_cmd_topic, QoS::AtLeastOnce);
@@ -127,8 +150,9 @@ impl EspMqttSink {
                     self.area_cmd_topic
                 );
             }
+            return true;
         }
-        changed
+        false
     }
 
     pub fn reconnects(&self) -> u32 {
@@ -236,8 +260,17 @@ impl EspMqttSink {
                         EventPayload::Received {
                             topic: Some(t),
                             data,
+                            details,
                             ..
                         } => {
+                            // Only complete messages are commands: a payload beyond the MQTT
+                            // buffer arrives chunked (InitialChunk carries the topic,
+                            // SubsequentChunk none) and must never be parsed as if complete.
+                            // No reassembly — real commands are tiny (COMMAND_PAYLOAD_MAX).
+                            if !matches!(details, Details::Complete) {
+                                log::warn!("MQTT: fragmentierte Nachricht auf {t} verworfen");
+                                continue;
+                            }
                             // {root}/command → area None; {root}/area/{id}/command → Some(id).
                             let area = if t == cmd_for_thread {
                                 Some(None)
@@ -248,8 +281,15 @@ impl EspMqttSink {
                                     .map(Some)
                             };
                             if let Some(area) = area {
-                                // The ESP wrapper does not expose the retain flag → treat as a live
-                                // command; disarm stays fail-closed via PIN + remote disarm.
+                                if data.is_empty() {
+                                    // Our own retained wipes (empty payload) may echo back
+                                    // if a wipe lands after the subscribe — never a command.
+                                    continue;
+                                }
+                                // The ESP event API does not expose the retain flag; retained
+                                // commands are prevented broker-side instead (wipe before
+                                // subscribe, see `poll_resubscribe`). Disarm additionally
+                                // stays fail-closed via PIN + remote-disarm gate.
                                 let panel_kind = app.lock().unwrap().persisted.panel.kind;
                                 match telenot_app::parse_command_message(data, false, panel_kind) {
                                     Ok((cmd, pin)) => {
@@ -300,6 +340,7 @@ impl EspMqttSink {
             last_retry: 0,
             client: Some(client),
             resub,
+            resub_wiped: false,
             cmd_topic,
             area_cmd_topic,
         })

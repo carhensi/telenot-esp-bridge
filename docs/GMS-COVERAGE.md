@@ -15,7 +15,9 @@ Mehr-Bereich und einzelne Steuer-Features, die der Protokoll-Layer bereits träg
 - Framing (FT1.2) + Prüfsumme, VdS-2465-Satz-Walker.
 - Satztypen dekodiert: 0x02, 0x24, 0x10, 0x0C, 0x50, 0x53, 0x54, 0x56, 0x11 (alle
   8 Fehlercodes). Neustart (0x53) → `event=restart` + Re-Sync des Belegt-/Bereichsstatus;
-  im CONFIRM_ACK abgelehnte Befehle (Fehler-Satz 0x11) → `command_result = FEHLER <code>`.
+  im CONFIRM_ACK abgelehnte Befehle (Fehler-Satz 0x11) → `command_result = FEHLER <code>`;
+  trifft der Fehlersatz erst NACH der Quittung ein (hiplex GMS plus), wird er innerhalb von
+  zwei Poll-Zyklen dem quittierten Befehl zugeordnet und ersetzt dessen `OK`.
 - Arm/Disarm/Reset (Bereich 1), Bereitschafts-Gate, Fail-Safe, virtueller armed_night.
 - **Befehls-Transaktion:** Senden nur in der Pause nach dem zweiten
   Statustelegramm, ACK-Tracking mit 3-s-Timeout, begrenzter Retry, `OK`/`NAK`/`TIMEOUT`

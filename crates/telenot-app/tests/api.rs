@@ -268,6 +268,19 @@ fn password_rotation_requires_current_password() {
         ),
     );
     assert_eq!(r.status, 204);
+
+    // Rotation kills the existing session — a stolen cookie must not survive it.
+    let r = dispatch(
+        &mut app,
+        &req(
+            Method::Get,
+            "/api/v1/sensors",
+            Value::Null,
+            Some(&token),
+            Some(&csrf),
+        ),
+    );
+    assert_eq!(r.status, 401, "Session nach Rotation ungültig");
 }
 
 #[test]

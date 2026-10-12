@@ -77,14 +77,13 @@ impl SensorClass {
 /// Generates a random, valid HomeKit pairing code (`xxx-xx-xxx`). Avoids Apple's forbidden codes
 /// (all digits equal, strictly ascending/descending) — NOT the public Espressif sample code.
 fn gen_setup_code() -> String {
-    // Without active WiFi/BT, esp_random() is only a weak PRNG. For the one-time code
-    // generation, enable the HW entropy source (SAR-ADC) → true TRNG, then disable again
-    // (must happen before any ADC/RF use — harmless here, Ethernet uses no ADC).
-    unsafe { esp_idf_svc::sys::bootloader_random_enable() };
-    let code = loop {
+    // HW entropy via the shared, lock-serialized source (`storage::secure_random`) —
+    // without active WiFi/BT the plain esp_random() is only a weak PRNG.
+    loop {
         let mut d = [0u8; 8];
+        crate::storage::secure_random(&mut d);
         for x in d.iter_mut() {
-            *x = (unsafe { esp_idf_svc::sys::esp_random() } % 10) as u8;
+            *x %= 10;
         }
         let all_same = d.iter().all(|&x| x == d[0]);
         let asc = d.windows(2).all(|w| w[1] == w[0] + 1);
@@ -96,9 +95,7 @@ fn gen_setup_code() -> String {
             "{}{}{}-{}{}-{}{}{}",
             d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]
         );
-    };
-    unsafe { esp_idf_svc::sys::bootloader_random_disable() };
-    code
+    }
 }
 
 /// Global app reference for C callbacks (the bridge is a single device).

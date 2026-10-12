@@ -67,7 +67,14 @@ Readback über das Sensor-Topic des Ausgangs; HA-Discovery legt je freigegebenem
 Ausgang einen `switch` an (`optimistic: false`).
 
 - **`retain=false` ist Pflicht** — ein mit retain empfangener Befehl wird verworfen + als
-  Diagnose gemeldet (sonst stille Re-Zustellung bei jedem Reconnect).
+  Diagnose gemeldet (sonst stille Re-Zustellung bei jedem Reconnect). Da das ESP-Event-API
+  das Retain-Flag eingehender Nachrichten nicht durchreicht, setzt die Firmware den
+  Kontrakt broker-seitig durch: bei jedem (Re)Connect werden die Command-Topics **vor dem
+  Subscribe** retained-geleert (leere retained Publishes auf `command` +
+  `area/1..16/command`) — ein beim Broker gespeicherter Befehl kann so nie zugestellt
+  werden. Leere Payloads auf Command-Topics werden nie als Befehl interpretiert.
+- Befehls-Payloads sind auf **1024 Bytes** begrenzt; größere und fragmentierte
+  (MQTT-Buffer überschreitende) Nachrichten werden verworfen.
 - **PIN** wird firmware-seitig gegen NVS geprüft (Argon2/PBKDF2), mit **persistentem
   Lockout** (überlebt Reboot). Die PIN wird **nie geloggt**.
 - **`DISARM` ist default-off** (fail-closed): nur wirksam, wenn Remote-Disarm im Setup
@@ -84,7 +91,8 @@ danach zu sichtbarem Scheitern. Bei Serial-Ausfall werden wartende Befehle **ver
 |---|---|
 | `OK <Cmd>` | Zentrale hat den Befehl quittiert (Zustand kommt trotzdem nur aus dem Snapshot) |
 | `REJECTED <Cmd>: …` | Pre-Arm-Gate: nicht scharfschaltbereit, gar nicht erst gesendet |
-| `FEHLER <Code>` | Zentrale lehnte ab (0x11-Fehlersatz im CONFIRM_ACK) |
+| `FEHLER <Code>` | Zentrale lehnte ab (0x11-Fehlersatz, im CONFIRM_ACK oder während der Transaktion) |
+| `FEHLER <Code> (<Cmd> nach Quittung abgelehnt)` | Zentrale hat zuerst quittiert (`OK` wurde publiziert) und den 0x11-Fehlersatz erst im Folgetelegramm geschickt (beobachtet: hiplex GMS plus); ersetzt das vorherige `OK` |
 | `NAK <Cmd>` | Zentrale antwortete CONFIRM_NAK |
 | `TIMEOUT <Cmd>: …` | keine Quittung nach allen Versuchen bzw. Serial offline → verworfen |
 
@@ -98,8 +106,9 @@ Modul (`telenot-app::hadisco`) statt des read-only Alarmzustand-Sensors ein
 ## Scharfschaltbereitschaft (Pre-Arm-Gate)
 
 Die Anlage lässt sich nur scharfschalten, wenn sie es meldet — Panel-eigene Bits
-`0x0535` (intern bereit) / `0x0536` (extern bereit), publiziert als `ready/intern` ·
-`ready/extern`. Die Firmware **prüft das vor dem Senden**: ein `ARM_HOME`/`ARM_NIGHT` bei
+`0x0535` (intern bereit) / `0x0536` (extern bereit) auf der complex, publiziert als
+`ready/intern` · `ready/extern`; auf der hiplex GMS plus `0x0505`/`0x0506` (verifiziert
+2026-10), publiziert als `area/1/ready/intern` · `area/1/ready/extern`. Die Firmware **prüft das vor dem Senden**: ein `ARM_HOME`/`ARM_NIGHT` bei
 `ready/intern=no` (bzw. `ARM_AWAY` bei `ready/extern=no`) wird **nicht gesendet**, sondern
 mit `command_result = REJECTED … (offen: <Kontakte>)` quittiert. HA sollte den Arm-Button
 anhand von `ready/*` ausgrauen. (Verifiziert am realen Mitschnitt: extern war bei offener

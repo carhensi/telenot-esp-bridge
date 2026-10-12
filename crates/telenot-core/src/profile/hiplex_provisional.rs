@@ -16,6 +16,15 @@
 //! positions there are computed from this profile, so tests stay valid). The COMMAND
 //! path is additionally gated by `config.panel.hiplex_cmds_verified` (default `false`)
 //! until this file has been capture-verified — reads are safe, writes are not.
+//!
+//! **Write-test result (real 8400 GMS plus, 2026-10, community test):** BOTH candidate
+//! command bases were rejected by the panel — the 0x0530 block (this profile) with
+//! 0x11/0x10 "Adresse außerhalb", and the capture-verified READ base 0x0500 (patched
+//! test build, Gerät/Bereich 1, Erw 0x02) with ACK followed by 0x11/0x18 "Funktion
+//! nicht möglich". The 0x0500 block is therefore status-only; how GMS plus is armed
+//! remotely is OPEN (possibly requires a hipas enablement). The command gate stays.
+//! The verified GMS-plus READ addresses (0x0500–0x0506, area 1) live as constants in
+//! `lib.rs` (`apply_hiplex_area`), deliberately not in this (lite-model) profile.
 
 use super::{AreaLayout, PanelKind, PanelProfile};
 
@@ -49,12 +58,15 @@ pub const HIPLEX8400: PanelProfile = PanelProfile {
     // `None` keeps the Schaltaktion command path disabled until a capture names it.
     schaltaktion_base: None,
     schaltaktion_max: 64,
-    // [ASSUMED] conservative: only the window BEFORE the status block is potentially
-    // switchable — with unverified addresses nothing else may be switched anyway.
+    // [ASSUMED] conservative: only the window BEFORE the (lite-model) status block was
+    // considered potentially switchable. Kept for documentation; the status window below
+    // now covers it entirely, so NO hiplex address is switchable until a capture proves
+    // a real output window.
     output_addr_range: 0x0500..0x0530,
-    // [ASSUMED] everything from the area blocks through the MB-bypassed window is
-    // system status and must never be switchable: 0x0530..(0x07B0 + 512).
-    status_addr_range: 0x0530..0x09B0,
+    // Starts at 0x0500 (capture-verified, 2026-10): on GMS plus the 0x0500 block carries
+    // the area-1 mode + readiness STATUS bits — it must never be switchable. Everything
+    // through the MB-bypassed window stays status too: 0x0500..(0x07B0 + 512).
+    status_addr_range: 0x0500..0x09B0,
 };
 
 #[cfg(test)]

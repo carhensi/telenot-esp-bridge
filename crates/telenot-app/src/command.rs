@@ -183,6 +183,10 @@ pub fn parse_bridge_command(
     }
 }
 
+/// Upper bound for a command payload. Real commands are < 100 bytes; anything bigger is
+/// noise or abuse and is rejected before JSON parsing allocates.
+pub const COMMAND_PAYLOAD_MAX: usize = 1024;
+
 /// Parse an incoming command message (e.g. MQTT payload).
 /// **`retained` messages are discarded** (contract: a retained command is stale or abusive).
 pub fn parse_command_message(
@@ -192,6 +196,9 @@ pub fn parse_command_message(
 ) -> Result<(BridgeCommand, Option<String>), &'static str> {
     if retained {
         return Err("retained command verworfen");
+    }
+    if payload.len() > COMMAND_PAYLOAD_MAX {
+        return Err("Payload zu groß");
     }
     let req: CommandReq = serde_json::from_slice(payload).map_err(|_| "ungültiges JSON")?;
     let cmd = parse_bridge_command(&req, panel_kind)?;

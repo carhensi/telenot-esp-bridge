@@ -5,8 +5,24 @@
 > Bereich 1 liest ab Basis **0x0500** (nicht 0x0530, wie aus der complex abgeleitet), das
 > Alarmbit speichert bis zum Rücksetzen, Discovery sammelt Eingangs-Belegtblöcke bis zur
 > Antwortpause (kein separater 0x72-Block). Offen: Befehlsadressen (Gate
-> `hiplex_cmds_verified` bleibt zu), GMS lite, weitere Bereiche, Bereit-Bits, andere
-> FW-Stände. Offline-Nachweis für Tester: `verify_hiplex_capture` (telenot-sim-Example).
+> `hiplex_cmds_verified` bleibt zu), GMS lite, weitere Bereiche, andere FW-Stände.
+> Offline-Nachweis für Tester: `verify_hiplex_capture` (telenot-sim-Example).
+>
+> **Update 2026-10 (gleicher Tester, reale 8400H):**
+> - **Bereit-Bits verifiziert** (Mitschnitt + Bedienteil-Gegenprüfung): Satz 0x24,
+>   Gerät 0, Erweiterung 0x02, aktiv-low — **0x0505 = intern scharf bereit,
+>   0x0506 = extern scharf bereit**. Ein offener Fensterkontakt nimmt beide zurück, ein
+>   intern ausgeschlossener BWM nur die externe. Die Firmware dekodiert die Bits jetzt
+>   im GMS-plus-Lesepfad (`area/1/ready/intern|extern`); damit funktioniert auch das
+>   Pre-Arm-Gate.
+> - **Steuer-Test NEGATIV, beide Adress-Kandidaten:** Die complex-abgeleiteten
+>   Schreibadressen (0x0530/0x0531/0x0532, Gerät 0) lehnt die Anlage mit Fehlersatz
+>   0x11/0x10 „Adresse außerhalb" ab. Ein Test-Build auf der verifizierten **Lese**-Basis
+>   (0x0500/Art 0xE1, 0x0501/0x62, 0x0502/0x61; Satz 0x02, Gerät/Bereich 1, Erw 0x02)
+>   wurde quittiert (8× ACK), aber mit 0x11/0x18 „Funktion nicht möglich" abgelehnt —
+>   der 0x0500-Block ist also reiner Status. **Wie GMS plus ferngeschaltet wird, ist
+>   offen** (Community-Hinweis: evtl. hipas-Freischaltung nötig). Das Gate
+>   `hiplex_cmds_verified` bleibt zu; Default unverändert.
 
 Additiv, kein Rewrite: Protokoll/Core/Config sind sauber getrennt — die Arbeit steckt im
 **Adress-/Topologie-Modell** und in der **Capture-Verifikation**. Engpass ist **H0** (echter
