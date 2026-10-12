@@ -15,7 +15,7 @@
   },
   "dependencies": {
     "@noble/hashes": "2.4.0",
-    "preact": "^10.29.8",
+    "preact": "^11.0.0",
     "qrcode-generator": "^2.0.4"
   },
   "devDependencies": {
