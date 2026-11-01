@@ -1,7 +1,9 @@
 # Hardware-Contract
 
 **Board:** Olimex **ESP32-POE-ISO-16MB** (klassischer ESP32, internes Ethernet/LAN8710A,
-802.3af PoE, galvanisch isoliert). 16 MB Flash wegen 2×OTA + LittleFS + Secure-Boot-Overhead.
+802.3af PoE, galvanisch isoliert). **Zwingend die 16-MB-Variante** — die 4-MB-Variante
+(ESP32-POE-ISO ohne Suffix) passt nicht: A/B-OTA (2 App-Slots à ~3 MB) + `cfg`- +
+`factory_nvs`-Partition brauchen das 16-MB-Layout (`partitions.csv`).
 **RS232-Tap:** isolierter Transceiver **ADM3251E** direkt an der Telenot-GMS-Schnittstelle
 (USR-TCP232-Modul entfällt). *Aktueller Aufbau: Variante C (MOD-RS232 am UEXT, GPIO4/36) —
 siehe „RS232-Anbindung" unten.* **Keine RTC → NTP/SNTP.**
@@ -68,7 +70,9 @@ getrennt**:
 
 Modul-RS232-Seite (TXD/RXD/GND) → Telenot-GMS, dort wo der USR-TCP232 saß. **Straight-through /
 1:1-Kabel — KEIN Null-Modem, TX/RX NICHT kreuzen** (empirisch am laufenden Aufbau bestätigt,
-2026-07-12: die complex-400-GMS-Buchse und die Modulseite matchen 1:1). Baud **9600 8N1**;
+2026-07-12: die complex-400-GMS-Buchse und die Modulseite matchen 1:1). Passend ist ein
+handelsübliches DB9-Verlängerungskabel Stecker↔Buchse, z. B. [AKYGA AK-CO-01, 2 m](https://www.amazon.de/dp/B07TYNT9CR).
+Baud **9600 8N1**;
 im Zweifel der Web-Schritt „Verbindung prüfen" (`reachable` = Frames kommen, `no_frame` = Port
 da, aber keine Daten). Strom kommt komplett über **PoE** (kein Netzteil): nur LAN(PoE) +
 3-Draht-Serial gehen ins Gehäuse.
@@ -127,8 +131,9 @@ unscharf, unabhängig von jeder Bridge-Einstellung. Deshalb:
 
 | Teil | ~Preis | Zweck |
 |---|---|---|
-| Olimex **ESP32-POE-ISO-16MB** | ~25 € | Board (PoE, isoliertes Ethernet, 16 MB) |
+| Olimex **ESP32-POE-ISO-16MB** | ~25 € | Board (PoE, isoliertes Ethernet) — **nur die 16-MB-Variante**, 4 MB reichen nicht fürs Partition-Layout |
 | Olimex **MOD-RS232** | ~6 € | RS232-Pegelwandler, steckt per Flachband auf den UEXT |
+| RS232-Kabel DB9 Stecker↔Buchse, 1:1 (**kein** Nullmodem) | ~5 € | MOD-RS232 ↔ GMS-Buchse der Zentrale, z. B. [AKYGA AK-CO-01, 2 m](https://www.amazon.de/dp/B07TYNT9CR) |
 | Aufputz-/Hutschienengehäuse mit Deckelkontakt | ~10 € | externe Box + Sabotageeinbindung |
 | Patchkabel zu PoE-Switch/-Injektor | — | Strom + Netzwerk in einem |
 
@@ -151,7 +156,8 @@ Mechanismen** (beide aktiv, weil je nach Netz/Client der eine oder andere greift
   filtern — daher der DHCP-Hostname als zweiter Weg.
 - **HTTPS-SAN:** `telenot-bridge.local` **und** `telenot-bridge` ins self-signed Cert als SAN
   aufnehmen, damit beim Zugriff über den Namen kein zusätzlicher Name-Mismatch zur (erwarteten)
-  Self-signed-Warnung dazukommt. Fingerprint-Abgleich gegen den Sticker bleibt der Vertrauensanker.
-- **Erst-Setup:** MQTT ist noch nicht konfiguriert → DHCP-Hostname (über die Fritz!Box) bzw. IP
-  vom Sticker ist der Weg. Beim späteren Setup-Window kommt zusätzlich das MQTT-Publish dazu
+  Self-signed-Warnung dazukommt. Fingerprint-Abgleich gegen das Diagnose-Log bzw. das MQTT-Publish
+  `diag/setup_window` bleibt der Vertrauensanker (es gibt keinen Geräteaufkleber).
+- **Erst-Setup:** MQTT ist noch nicht konfiguriert → DHCP-Hostname (über die Fritz!Box) bzw. die
+  im Router sichtbare IP ist der Weg. Beim späteren Setup-Window kommt zusätzlich das MQTT-Publish dazu
   (siehe `docs/THREAT-MODEL.md`, „Setup-Window (Re-Entry)").
