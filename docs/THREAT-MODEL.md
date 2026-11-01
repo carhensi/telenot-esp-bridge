@@ -82,8 +82,10 @@ portablen Crates) wurden bestätigt. Behobene Lücken:
 - `overflow-checks = true` im Release; `publish = false` workspace-weit; SECURITY.md
 - Einziger `dangerouslySetInnerHTML`-Einsatz ist das gerätegenerierte QR-SVG — akzeptiert
 
-Offene Punkte (Stand Review-Ende): gerätespezifisches **Provisioning** (Sticker statt
-bekanntem Initialpasswort), **Web-Frontend-Testabdeckung**, **HTTPS fürs Setup-Fenster**.
+Offene Punkte (Stand Review-Ende): **Web-Frontend-Testabdeckung**, **HTTPS fürs Setup-Fenster**.
+Gerätespezifisches Provisioning (individuelles Passwort statt `telenot-init`) wurde geprüft und
+**nicht weiterverfolgt** — ohne Aufkleber/Display kein tragfähiger Kanal, und das Setup-Fenster
+ist ohnehin nur lokal und zeitbegrenzt erreichbar.
 B6 bleibt bewusst verworfen (s.o.). A/B-OTA-Befund: Rollback existiert **nur** mit dem
 esp-idf-Bootloader — der espflash-Default wertet `PENDING_VERIFY` nicht aus
 (Kabel-Flash-Regeln: [HARDWARE.md](HARDWARE.md)).
@@ -114,7 +116,7 @@ NORMAL (Listener wieder zu)
 - **Auto-Close** per hartem Timeout + UI-„Fertig" + Commit-Reboot; der Listener kann nicht
   versehentlich „an" bleiben.
 - **Auth bleibt Pflicht:** das beim First-Boot gesetzte NVS-Passwort gilt weiter — **kein**
-  Rückfall auf das Sticker-Initialpasswort. Rate-Limit/429 + CSRF wie im Erst-Setup.
+  Rückfall auf das Initialpasswort `telenot-init`. Rate-Limit/429 + CSRF wie im Erst-Setup.
 - **Sichtbarkeit:** LED-Muster (GPIO32) zeigt physisch, dass der Server läuft.
 - **Auffindbarkeit** (Gerät hat kein Display): beim Öffnen `diag/setup_window →
   {url, fingerprint, expires_s}` auf MQTT publishen (reines Outbound, kein Inbound-Trigger).

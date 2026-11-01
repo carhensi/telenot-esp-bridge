@@ -43,7 +43,8 @@ Dokumentiert, damit sie nicht als „neue" Findings gemeldet werden
 - **Initialpasswort `telenot-init` ist per Design öffentlich bekannt** (steht in
   README und Quellcode). Es funktioniert nur im lokalen Setup-Fenster, und bis zum
   **erzwungenen Passwortwechsel** beim First-Boot lässt die API keine andere Aktion
-  zu. Gerätespezifisches Provisioning (Sticker) ist geplant.
+  zu. Es gibt **keinen Geräteaufkleber** mit individuellem Passwort — das Setup-Web
+  nennt `telenot-init` direkt im Login-Dialog.
 - **MQTT-Passwort liegt unverschlüsselt im NVS** (die Firmware muss es zum
   Verbinden lesen). NVS-Verschlüsselung (via Flash-Encryption/Secure-Boot, „B6")
   wurde geprüft und **bewusst verworfen** — Restrisiko akzeptiert: das Passwort

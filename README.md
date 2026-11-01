@@ -6,14 +6,15 @@
 [![Rust](https://img.shields.io/badge/Rust-esp--Toolchain-orange.svg?logo=rust)](https://github.com/esp-rs)
 [![ESP-IDF](https://img.shields.io/badge/ESP--IDF-v5.5.4-red.svg?logo=espressif)](https://docs.espressif.com/projects/esp-idf/)
 [![Target](https://img.shields.io/badge/Target-ESP32--POE--ISO-lightgrey.svg)](docs/HARDWARE.md)
-[![Tests](https://img.shields.io/badge/Tests-191%20passing-brightgreen.svg)](#status)
+[![Tests](https://img.shields.io/badge/Tests-234%20passing-brightgreen.svg)](#status)
 [![HomeKit](https://img.shields.io/badge/Works%20with-HomeKit%20%C2%B7%20Home%20Assistant-black.svg)](docs/homeassistant.md)
 [![CI](https://github.com/carhensi/telenot-esp-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/carhensi/telenot-esp-bridge/actions/workflows/ci.yml)
 [![Release](https://github.com/carhensi/telenot-esp-bridge/actions/workflows/release.yml/badge.svg)](https://github.com/carhensi/telenot-esp-bridge/actions/workflows/release.yml)
 
 Robuste **Rust-Firmware-Appliance**, die eine **Telenot complex 400** (Einbruchmeldeanlage)
 direkt über deren serielle GMS-Schnittstelle ausliest und steuert — als versiegeltes Gerät
-(Olimex **ESP32-POE-ISO-16MB**, PoE-gespeist, galvanisch isoliert) **im EMA-Gehäuse selbst**.
+(Olimex **ESP32-POE-ISO-16MB** — zwingend die 16-MB-Variante, PoE-gespeist, galvanisch
+isoliert) **im EMA-Gehäuse selbst**.
 Nachfolger der Node.js-[telenot-bridge](https://github.com/carhensi/telenot-bridge): kein
 Host-Rechner, kein Docker, kein externer Serial-TCP-Konverter mehr. Ein Netzwerkkabel rein,
 fertig.
@@ -122,6 +123,17 @@ legt die Entities automatisch an. Details: [`web/README.md`](web/README.md).
 
 ## Firmware bauen & flashen
 
+### Hardware (kaufen & stecken)
+
+| Teil | ~Preis | Hinweis |
+|---|---|---|
+| Olimex **ESP32-POE-ISO-16MB** | ~25 € | **Zwingend die 16-MB-Variante.** Die 4-MB-Variante (ohne Suffix) passt nicht: A/B-OTA + `cfg`- + `factory_nvs`-Partition brauchen das 16-MB-Layout |
+| Olimex **MOD-RS232** | ~6 € | RS232-Pegelwandler, steckt direkt auf den UEXT — kein Löten |
+| RS232-Kabel DB9 Stecker↔Buchse, **1:1 (kein Nullmodem)** | ~5 € | z. B. [AKYGA AK-CO-01, 2 m](https://www.amazon.de/dp/B07TYNT9CR) — TX/RX nicht kreuzen |
+| Gehäuse mit Deckelkontakt + PoE-Switch/-Injektor | ~10 € | externe Box in den Sabotagekreis einschleifen |
+
+Verdrahtung, Varianten (isoliert/nicht isoliert) und Einbau: [Hardware](docs/HARDWARE.md).
+
 ### Flashen im Browser (empfohlen)
 
 Fertige Firmware ohne Toolchain: **[Web-Flasher](https://carhensi.github.io/telenot-esp-bridge/)**
@@ -158,14 +170,14 @@ espflash flash --partition-table partitions.csv --port <PORT> \
 Geflasht wird über den Micro-USB-Port des Boards (CH340). HomeKit-Direktmodus ist Default;
 MQTT/Home Assistant unter „Erweitert". Das Setup-Web läuft nur im **Setup-Fenster** (30 min
 nach Boot, per Board-Taster BUT1 erneut) — Details in [Hardware](docs/HARDWARE.md).
-Das Initialpasswort `telenot-init` ist **per Design öffentlich bekannt**: Login ist nur im
-lokalen Setup-Fenster möglich, und die erste Aktion ist der **erzwungene Passwortwechsel** —
-vorher lässt die API nichts anderes zu.
+Erstanmeldung mit dem festen Initialpasswort **`telenot-init`** (es gibt keinen Geräteaufkleber).
+Es ist **per Design öffentlich bekannt**: Login ist nur im lokalen Setup-Fenster möglich, und
+die erste Aktion ist der **erzwungene Passwortwechsel** — vorher lässt die API nichts anderes zu.
 
 ## Status
 
 **Die Bridge läuft im Produktivbetrieb** — im EMA-Gehäuse, an der echten Anlage, Updates per OTA.
-`cargo test --workspace` (191 Tests) grün, `clippy -D warnings` + `fmt` sauber; CI erzwingt
+`cargo test --workspace` (234 Tests) grün, `clippy -D warnings` + `fmt` sauber; CI erzwingt
 beides bei jedem Push/PR. Protokoll-Layer vollständig gegen einen realen pcap-Mitschnitt
 der Anlage und 198 reale Befehls-Telegramme der Vorgänger-Bridge verifiziert.
 
