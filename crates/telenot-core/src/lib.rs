@@ -53,6 +53,14 @@ pub const EAGER_IDLE_GUARD_MS: Tick = 400;
 /// without this window the error would be filtered as discovery noise and the published
 /// `OK` would stand uncorrected. Two poll cycles cover the next status telegram with margin.
 pub const LATE_FEHLER_WINDOW_MS: Tick = 2 * POLL_INTERVAL_MS;
+/// Pairing window between a spontaneous arm/disarm message (carries the `changed_by`
+/// text) and the mode change in the cyclic block status. The two arrive in separate
+/// telegrams in no guaranteed order; a mode change with no message within this window
+/// before or after it clears `changed_by` instead of keeping a stale name.
+pub const CHANGED_BY_WINDOW_MS: Tick = 2 * POLL_INTERVAL_MS;
+/// Upper bound for a panel text taken from a spontaneous message (`changed_by`,
+/// `triggered_by`, diagnostic log); panel texts are 16 characters.
+const CHANGED_BY_MAX_LEN: usize = 32;
 
 /// Canonical **complex 400H** area-status addresses (verified via pcap).
 /// Legacy aliases of [`COMPLEX400`] — the profile is the source of truth
@@ -144,6 +152,65 @@ impl Default for AreaState {
     }
 }
 
+/// Switching mode of an area as far as `changed_by` is concerned: night is a virtual
+/// flavor of intern, and triggered/unknown are no mode of their own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArmMode {
+    Disarmed,
+    Intern,
+    Extern,
+}
+
+impl ArmMode {
+    fn of(state: ArmState) -> Option<Self> {
+        match state {
+            ArmState::Disarmed => Some(ArmMode::Disarmed),
+            ArmState::ArmedHome | ArmState::ArmedNight => Some(ArmMode::Intern),
+            ArmState::ArmedAway => Some(ArmMode::Extern),
+            ArmState::Triggered | ArmState::Unknown => None,
+        }
+    }
+}
+
+/// `changed_by` annotation of one area: the text the panel attaches (record 0x54) to its
+/// spontaneous arm/disarm message — `GMS` for this interface, `Berechtigung N` for a
+/// code/transponder at the panel. Pure annotation; never feeds the arm state.
+#[derive(Default)]
+struct ChangedBy {
+    /// Published text; `None` = `unknown`.
+    text: Option<String>,
+    mode: Option<ArmMode>,
+    /// Arrival of a switching message not yet matched to a mode change.
+    attributed_at: Option<Tick>,
+    /// Mode change still waiting for its switching message.
+    unattributed_since: Option<Tick>,
+}
+
+/// `triggered_by` annotation: the detection point the panel named (spontaneous alarm
+/// message + ASCII record 0x54) as the alarm cause. Pure annotation like `changed_by`.
+#[derive(Default)]
+enum TriggeredBy {
+    /// Nothing published this boot (a previous run's retained value may still stand).
+    #[default]
+    Unannounced,
+    /// Alarm state without a known cause (bridge started / recovered mid-alarm).
+    Unknown,
+    /// No alarm.
+    None,
+    Cause(String),
+}
+
+impl TriggeredBy {
+    fn payload(&self) -> Option<&str> {
+        match self {
+            TriggeredBy::Unannounced => None,
+            TriggeredBy::Unknown => Some("unknown"),
+            TriggeredBy::None => Some("none"),
+            TriggeredBy::Cause(text) => Some(text),
+        }
+    }
+}
+
 /// Availability (fail-safe). `Unavailable` = serial stream has gone silent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Availability {
@@ -200,6 +267,15 @@ pub struct Core {
     /// Bypass state per detection area (readback from `mb_gesperrt_base`+). Only
     /// observed transitions or bypassed areas are published (no boot topic flood).
     mb_bypassed: BTreeMap<u16, bool>,
+    /// `changed_by` per area; an entry exists once the retained topic has been written
+    /// this boot (bounded: areas × ≤ [`CHANGED_BY_MAX_LEN`] bytes).
+    changed_by: BTreeMap<u8, ChangedBy>,
+    /// Alarm cause for the top-level state (bounded: message type + panel text).
+    triggered_by: TriggeredBy,
+    /// One bit per raw message type (0x00–0xFF) already written to the diagnostic log
+    /// as "unhandled" this boot — a fixed 32 bytes, so a chatty panel can neither grow
+    /// the heap nor flood the ring log.
+    unhandled_logged: [u8; 32],
     last_frame_at: Option<Tick>,
     recovery_count: u32,
     /// Queued command + prior send attempts + queue timestamp; sent in the next
@@ -305,6 +381,9 @@ impl Core {
             areas: BTreeMap::new(),
             sensor_state: BTreeMap::new(),
             mb_bypassed: BTreeMap::new(),
+            changed_by: BTreeMap::new(),
+            triggered_by: TriggeredBy::Unannounced,
+            unhandled_logged: [0; 32],
             last_frame_at: None,
             recovery_count: 0,
             pending: None,
@@ -437,7 +516,7 @@ impl Core {
             Some(Function::SendNdat) => {
                 self.requeue_on_collision(now, had_fehler, &mut actions);
                 actions.push(ack());
-                let outputs_seen = self.process_records(frame, &mut actions);
+                let outputs_seen = self.process_records(now, frame, &mut actions);
                 // Command window: only in the pause AFTER the second status telegram
                 // (outputs, address extension 0x02) — never between the two telegrams.
                 if outputs_seen {
@@ -652,6 +731,22 @@ impl Core {
                     retain: true,
                 });
             }
+            self.clear_changed_by(&mut actions);
+            self.forget_triggered_by(&mut actions);
+        }
+        // Mode change whose switching message never came (e.g. a panel that sends none):
+        // drop the previous name rather than attribute the new mode to it.
+        let multi = self.profile.areas.count > 1;
+        for (&area, cb) in self.changed_by.iter_mut() {
+            if cb
+                .unattributed_since
+                .is_some_and(|t| now.saturating_sub(t) > CHANGED_BY_WINDOW_MS)
+            {
+                cb.unattributed_since = None;
+                if cb.text.take().is_some() {
+                    publish_changed_by(multi, area, "unknown", &mut actions);
+                }
+            }
         }
         if self.availability == Availability::Online {
             // `None` = no frame ever received since boot (e.g. flashed/booted without panel)
@@ -786,6 +881,9 @@ impl Core {
         self.sensor_seen.fill(Tick::MAX);
         self.last_area_status = None;
         self.mb_bypassed.clear();
+        // Whoever switches during the outage goes unseen — the old name must not survive.
+        self.clear_changed_by(actions);
+        self.forget_triggered_by(actions);
         actions.push(Action::Publish {
             topic: "availability".into(),
             payload: "offline".into(),
@@ -812,17 +910,179 @@ impl Core {
     /// Processes the records of a SEND_NDAT. Returns `true` if the telegram contained the
     /// output block status (address extension 0x02) — the second status telegram of the poll
     /// cycle and the start of the command window (observed on the real panel).
-    fn process_records(&mut self, frame: &Frame, actions: &mut Vec<Action>) -> bool {
+    fn process_records(&mut self, now: Tick, frame: &Frame, actions: &mut Vec<Action>) -> bool {
         let mut outputs_seen = false;
         for rec in frame.records().filter_map(|r| r.ok()) {
             if let Some(bs) = rec.as_block_status() {
                 outputs_seen |= bs.adresserweiterung == ERW_AUSGAENGE;
                 self.apply_block_status(&bs, actions);
             } else if let Some(m) = rec.as_meldung() {
-                self.handle_spontaneous(m.address(), m.kind(), m.is_active(), actions);
+                let text = panel_text(frame);
+                let text = text.as_deref();
+                let handled =
+                    self.handle_spontaneous(m.address(), m.kind(), m.is_active(), text, actions);
+                let switched = self.note_changed_by(now, m.address(), m.kind(), text, actions);
+                if !(handled || switched) {
+                    self.log_unhandled(&m, text, actions);
+                }
             }
         }
         outputs_seen
+    }
+
+    /// Area whose status block contains `addr` (8 bits per area).
+    fn area_of_addr(&self, addr: u16) -> Option<u8> {
+        if self.hiplex_plus() {
+            return (0x0500..0x0508).contains(&addr).then_some(1);
+        }
+        (1..=self.profile.areas.count).find(|&area| {
+            let base = self.profile.area_addr(area, 0);
+            (base..base + 8).contains(&addr)
+        })
+    }
+
+    /// Takes the `changed_by` text from a spontaneous switching message: the panel sends
+    /// the source as an ASCII record (0x54) in the same telegram. Verified on complex
+    /// captures for arm/disarm (0x61/0x62). Reset (0x52) is anticipated, NOT
+    /// capture-verified — hence the log line, so the first real reset shows what the
+    /// panel actually sends. Returns `true` if the message was taken as a source.
+    fn note_changed_by(
+        &mut self,
+        now: Tick,
+        address: u16,
+        kind: MeldungsArt,
+        text: Option<&str>,
+        actions: &mut Vec<Action>,
+    ) -> bool {
+        let reset = match kind {
+            MeldungsArt::Sicherungsbereich | MeldungsArt::Internbereich => false,
+            MeldungsArt::Ruecksetzen => true,
+            _ => return false,
+        };
+        let Some(text) = text else {
+            return false;
+        };
+        let multi = self.profile.areas.count > 1;
+        let Some(area) = self.area_of_addr(address).or((!multi).then_some(1)) else {
+            return false;
+        };
+        if reset {
+            actions.push(Action::Log(format!(
+                "Rücksetz-Meldung @0x{address:04X} mit Text „{text}“ → changed_by (unverifiziert)"
+            )));
+        }
+        let cb = self.changed_by.entry(area).or_default();
+        cb.text = Some(text.into());
+        if cb.unattributed_since.take().is_none() && !reset {
+            // Message first: the mode change follows in a later status telegram.
+            cb.attributed_at = Some(now);
+        }
+        // Published on every message, also with an unchanged text (two switches in a row
+        // by the same source are two events for the consumer).
+        publish_changed_by(multi, area, text, actions);
+        true
+    }
+
+    /// Follows the top-level state for `triggered_by`: announces `none`/`unknown` on the
+    /// first known state (overwriting a previous run's retained value) and drops the
+    /// cause once the state moves on to anything but triggered. Call BEFORE `arm_state`
+    /// is updated to `new`.
+    fn track_triggered_by(&mut self, new: ArmState, actions: &mut Vec<Action>) {
+        let old = self.arm_state;
+        if new == ArmState::Unknown {
+            return;
+        }
+        let next = match self.triggered_by {
+            TriggeredBy::Unannounced if new == ArmState::Triggered => TriggeredBy::Unknown,
+            TriggeredBy::Unannounced => TriggeredBy::None,
+            TriggeredBy::Unknown | TriggeredBy::Cause(_)
+                if new != ArmState::Triggered && old != ArmState::Unknown && old != new =>
+            {
+                TriggeredBy::None
+            }
+            _ => return,
+        };
+        self.set_triggered_by(next, actions);
+    }
+
+    fn set_triggered_by(&mut self, next: TriggeredBy, actions: &mut Vec<Action>) {
+        self.triggered_by = next;
+        if let Some(payload) = self.triggered_by.payload() {
+            actions.push(Action::Publish {
+                topic: "triggered_by".into(),
+                payload: payload.into(),
+                retain: true,
+            });
+        }
+    }
+
+    /// Serial outage / lost area status: an alarm may start or end unseen.
+    fn forget_triggered_by(&mut self, actions: &mut Vec<Action>) {
+        if !matches!(self.triggered_by, TriggeredBy::Unannounced) {
+            self.set_triggered_by(TriggeredBy::Unknown, actions);
+        }
+        // Re-announce from the first status after recovery.
+        self.triggered_by = TriggeredBy::Unannounced;
+    }
+
+    /// Diagnostic log for spontaneous messages nothing else consumed (unknown message
+    /// types, alarm withdrawals, …) — once per raw message type per boot. Shows what a
+    /// panel sends beyond the capture-verified set without anyone pulling a capture.
+    fn log_unhandled(
+        &mut self,
+        m: &telenot_protocol::Meldung,
+        text: Option<&str>,
+        actions: &mut Vec<Action>,
+    ) {
+        let (slot, bit) = ((m.meldungsart >> 3) as usize, 1u8 << (m.meldungsart & 7));
+        if self.unhandled_logged[slot] & bit != 0 {
+            return;
+        }
+        self.unhandled_logged[slot] |= bit;
+        actions.push(Action::Log(format!(
+            "Unverarbeitete Meldung (je Art einmal pro Boot): {:?} 0x{:02X} @0x{:04X}, \
+             Gerät/Bereich {}, Erw 0x{:02X}, Text „{}“",
+            m.kind(),
+            m.meldungsart,
+            m.address(),
+            m.geraet_bereich,
+            m.adresserweiterung,
+            text.unwrap_or("—")
+        )));
+    }
+
+    /// Follows an area's mode in the block status for `changed_by`: the first status
+    /// after boot overwrites whatever a previous run left retained, and a mode change
+    /// without a switching message starts the clear timer (see `on_tick`).
+    fn track_changed_by_mode(&mut self, area: u8, state: ArmState, actions: &mut Vec<Action>) {
+        let now = self.last_frame_at.unwrap_or(0);
+        let multi = self.profile.areas.count > 1;
+        if !self.changed_by.contains_key(&area) {
+            publish_changed_by(multi, area, "unknown", actions);
+        }
+        let cb = self.changed_by.entry(area).or_default();
+        let Some(mode) = ArmMode::of(state) else {
+            return;
+        };
+        if cb.mode.replace(mode).is_some_and(|old| old != mode) {
+            let attributed = cb
+                .attributed_at
+                .take()
+                .is_some_and(|t| now.saturating_sub(t) <= CHANGED_BY_WINDOW_MS);
+            if !attributed {
+                cb.unattributed_since = Some(now);
+            }
+        }
+    }
+
+    /// Drops every `changed_by` (serial outage / lost area status).
+    fn clear_changed_by(&mut self, actions: &mut Vec<Action>) {
+        let multi = self.profile.areas.count > 1;
+        for (&area, cb) in self.changed_by.iter_mut() {
+            if std::mem::take(cb).text.is_some() {
+                publish_changed_by(multi, area, "unknown", actions);
+            }
+        }
     }
 
     /// Collision resolution: if the GMS receives a panel SEND while our command is
@@ -972,7 +1232,9 @@ impl Core {
         let first = self.last_area_status.is_none();
         self.last_area_status = self.last_frame_at;
         self.areas.entry(1).or_default().arm = state;
+        self.track_changed_by_mode(1, state, actions);
         if first || state != self.arm_state {
+            self.track_triggered_by(state, actions);
             self.arm_state = state;
             for topic in ["state", "area/1/state"] {
                 actions.push(Action::Publish {
@@ -1050,6 +1312,18 @@ impl Core {
                     publish(topic, if ready { "yes" } else { "no" }, emit);
                 }
             }
+        }
+        for (&area, cb) in &self.changed_by {
+            let text = cb.text.as_deref().unwrap_or("unknown");
+            if multi {
+                publish(format!("area/{area}/changed_by"), text, emit);
+            }
+            if !multi || area == 1 {
+                publish("changed_by".into(), text, emit);
+            }
+        }
+        if let Some(payload) = self.triggered_by.payload() {
+            publish("triggered_by".into(), payload, emit);
         }
         for (&mb, &bypassed) in &self.mb_bypassed {
             publish(
@@ -1157,6 +1431,7 @@ impl Core {
                 entry.arm = new_state;
                 changed
             };
+            self.track_changed_by_mode(area, new_state, actions);
             // Per-area topics only on multi-area panels — single-area (complex) keeps
             // exactly the historical topic set.
             if changed && count > 1 {
@@ -1172,6 +1447,7 @@ impl Core {
             // Top-level `state`: area 1 (single-area) / severity aggregate (multi-area).
             let top = self.top_level_state();
             if top != self.arm_state {
+                self.track_triggered_by(top, actions);
                 self.arm_state = top;
                 actions.push(Action::Publish {
                     topic: "state".into(),
@@ -1337,8 +1613,10 @@ impl Core {
         address: u16,
         kind: MeldungsArt,
         active: bool,
+        text: Option<&str>,
         actions: &mut Vec<Action>,
-    ) {
+    ) -> bool {
+        let mut handled = false;
         // Event overlay: publish alarms/sabotage as diagnostic events (no state owner).
         if matches!(
             kind,
@@ -1353,6 +1631,19 @@ impl Core {
                 payload: format!("{kind:?}@0x{address:04X}"),
                 retain: false,
             });
+            // Alarm cause: the first detector named while triggered stands (follow-up
+            // detectors of the same alarm must not replace it); outside an alarm state
+            // the latest message wins, so a stale cause never blocks a new one.
+            if self.arm_state != ArmState::Triggered
+                || !matches!(self.triggered_by, TriggeredBy::Cause(_))
+            {
+                let cause = match text {
+                    Some(text) => format!("{kind:?}: {text}"),
+                    None => format!("{kind:?}@0x{address:04X}"),
+                };
+                self.set_triggered_by(TriggeredBy::Cause(cause), actions);
+            }
+            handled = true;
         }
 
         // Fault/technical detection points (battery/mains/transmission path/fault/technical/
@@ -1373,6 +1664,7 @@ impl Core {
                 ),
                 retain: false,
             });
+            handled = true;
         }
 
         // Panel restart (0x53): publish + re-sync hint. After a restart the firmware
@@ -1386,7 +1678,9 @@ impl Core {
             actions.push(Action::Log(
                 "Zentrale-Neustart erkannt — Re-Sync empfohlen".into(),
             ));
+            handled = true;
         }
+        handled
     }
 
     /// Sends the pending command if the line is free. Returns `true` if a frame was sent
@@ -1526,6 +1820,38 @@ fn fail_command(cmd: TxCmd, why: &str, actions: &mut Vec<Action>) {
         "Befehl {} gescheitert: {why}",
         cmd.label()
     )));
+}
+
+/// Text the panel attaches (ASCII record 0x54) to a spontaneous message, decoded, capped
+/// and trimmed; `None` if absent or blank.
+fn panel_text(frame: &Frame) -> Option<String> {
+    let raw = frame
+        .records()
+        .filter_map(|r| r.ok())
+        .find_map(|r| r.as_ascii())?;
+    let text = decode_panel_text(&raw[..raw.len().min(CHANGED_BY_MAX_LEN)]);
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+/// `changed_by` publish (retained): single-area panels use the top-level topic only;
+/// multi-area panels publish per area, and the top-level topic follows area 1 (like
+/// the top-level `command`).
+fn publish_changed_by(multi: bool, area: u8, payload: &str, actions: &mut Vec<Action>) {
+    if multi {
+        actions.push(Action::Publish {
+            topic: format!("area/{area}/changed_by"),
+            payload: payload.into(),
+            retain: true,
+        });
+    }
+    if !multi || area == 1 {
+        actions.push(Action::Publish {
+            topic: "changed_by".into(),
+            payload: payload.into(),
+            retain: true,
+        });
+    }
 }
 
 fn ack() -> Action {

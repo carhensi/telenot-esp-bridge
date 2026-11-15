@@ -18,6 +18,8 @@ Mit `HA-Discovery = an` publiziert die Bridge nach `homeassistant/…`:
 | Alarm-Zentrale (steuerbar) | `alarm_control_panel` | `alarm_control_panel.telenot_bridge_alarm` |
 | Scharf-intern-bereit | `binary_sensor` (safety) | `binary_sensor.telenot_bridge_scharf_intern_bereit` |
 | Scharf-extern-bereit | `binary_sensor` (safety) | `binary_sensor.telenot_bridge_scharf_extern_bereit` |
+| Zuletzt geschaltet von | `sensor` | `sensor.telenot_bridge_zuletzt_geschaltet_von` |
+| Alarm ausgelöst durch | `sensor` | `sensor.telenot_bridge_alarm_ausgelost_durch` |
 | je bestätigter Melder | `binary_sensor` (passende device_class) | `binary_sensor.telenot_bridge_<name>` |
 
 > **entity_id-Präfix:** Alle Entities hängen an **einem** Gerät „Telenot Bridge" → HA setzt
@@ -29,6 +31,29 @@ Das Alarm-Panel kann `ARM_HOME`/`ARM_AWAY`/`ARM_NIGHT`/`DISARM`, States
 `disarmed`/`armed_home`/`armed_away`/`armed_night`/`triggered`. **Disarm braucht die PIN**
 (`code_disarm_required: true`), wenn im Setup Remote-Disarm aktiviert ist — ohne das Opt-in
 ist Disarm über die Bridge gesperrt (fail-closed). Siehe **Abschnitt 5** für Arm/Disarm mit PIN.
+
+**Zuletzt geschaltet von** zeigt den Text der Zentrale zur letzten Scharf-/Unscharfschaltung:
+`GMS` (über die Bridge) oder `Berechtigung <n>` (Code/Transponder an der Anlage — die
+Berechtigung, nicht das Bedienteil). `unknown`, solange die Quelle nicht bekannt ist; Details
+und Grenzen im [MQTT-Contract](MQTT-CONTRACT.md#schaltquelle-changed_by). Beispiel:
+
+```yaml
+# automations.yaml — Push, wenn jemand an der Anlage schaltet
+- alias: "Telenot: Schaltung an der Anlage"
+  trigger:
+    - platform: state
+      entity_id: sensor.telenot_bridge_zuletzt_geschaltet_von
+  condition:
+    - "{{ trigger.to_state.state.startswith('Berechtigung') }}"
+  action:
+    - service: notify.notify
+      data:
+        message: "Anlage geschaltet durch {{ trigger.to_state.state }}"
+```
+
+**Alarm ausgelöst durch** nennt bei einem Alarm den Auslöser laut Zentrale, z. B.
+`Einbruch: MA-MG02` (Meldungsart + Text des Meldepunkts); ohne Alarm `none`. Praktisch für die
+Push-Nachricht zum Alarm — Details im [MQTT-Contract](MQTT-CONTRACT.md#alarm-auslöser-triggered_by).
 
 ### Namen, Räume & Icons — Home Assistant ist führend
 

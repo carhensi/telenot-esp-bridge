@@ -3,9 +3,9 @@
 
 use telenot_config::{Config, Polarity, Sensor, SensorKind, CURRENT_SCHEMA_VERSION};
 use telenot_core::{
-    Action, ArmCommand, ArmState, Availability, Core, CoreOptions, Tick, COMMAND_ACK_TIMEOUT_MS,
-    COMMAND_MAX_ATTEMPTS, EAGER_IDLE_GUARD_MS, LATE_FEHLER_WINDOW_MS, RECOVERY_FRAMES,
-    SERIAL_DEADLINE_MS,
+    Action, ArmCommand, ArmState, Availability, Core, CoreOptions, Tick, CHANGED_BY_WINDOW_MS,
+    COMMAND_ACK_TIMEOUT_MS, COMMAND_MAX_ATTEMPTS, EAGER_IDLE_GUARD_MS, LATE_FEHLER_WINDOW_MS,
+    RECOVERY_FRAMES, SERIAL_DEADLINE_MS,
 };
 use telenot_protocol::{
     encode_command_02, encode_frame, satztyp, Frame, FrameDecoder, C_SEND_NDAT, ERW_AUSGAENGE,
@@ -1074,4 +1074,324 @@ fn republish_recovers_readiness_and_bypass_state() {
     )));
     assert!(topics.iter().any(|(t, _)| t == "ready/extern"));
     assert!(topics.contains(&("mb/1/bypassed".into(), "ON".into())));
+}
+
+// --- changed_by -------------------------------------------------------------
+
+// Real frames: spontaneous arm-home via the GMS interface (text "GMS") and arm-away at the
+// panel (text "Berechtigung 7").
+const SPONT_INTERN_ARM: &str = "682c2c6873020502000531016207501a1406020824051054474d53202020202020202020202020200656999999ffffffe216";
+const SPONT_EXTERN_ARM: &str = "682c2c6873020502000532016107500514030b0813121054426572656368746967756e67203720200656008051ffffffbc16";
+
+/// Just past the pairing window, still inside the serial liveness deadline.
+const PAST_WINDOW: Tick = CHANGED_BY_WINDOW_MS + 1;
+
+const AREA_DISARMED: u8 = 0xFE;
+const AREA_INTERN: u8 = 0xFD;
+const AREA_EXTERN: u8 = 0xFB;
+const AREA_ALARM: u8 = 0xF7;
+
+/// Area-1 status block (base 0x0530, active-low: unscharf/intern/extern/alarm = bits 0–3).
+fn area_status(bits: u8) -> Frame {
+    Frame::new(&[0x73, 2, 5, 0x24, 0, 0x05, 0x30, 2, bits]).unwrap()
+}
+
+/// Spontaneous message at `addr` followed by an ASCII record (0x54), as the panel sends it.
+fn switch_msg(addr: u16, meldungsart: u8, text: &str) -> Frame {
+    let mut recs = meldung_rec(addr, meldungsart);
+    recs.push(text.len() as u8);
+    recs.push(satztyp::ASCII);
+    recs.extend_from_slice(text.as_bytes());
+    ndat(&recs)
+}
+
+#[test]
+fn changed_by_from_real_spontaneous_frames() {
+    let mut c = core(false);
+    let a = c.on_frame(0, &decode(SPONT_INTERN_ARM));
+    assert_eq!(published(&a, "changed_by").as_deref(), Some("GMS"));
+    let a = c.on_frame(100, &decode(SPONT_EXTERN_ARM));
+    assert_eq!(
+        published(&a, "changed_by").as_deref(),
+        Some("Berechtigung 7")
+    );
+    // Annotation only: the arm state still comes from the block status alone.
+    assert_eq!(c.arm_state(), ArmState::Unknown);
+}
+
+#[test]
+fn changed_by_first_status_overwrites_stale_retained_value() {
+    let mut c = core(false);
+    let a = c.on_frame(0, &area_status(AREA_DISARMED));
+    assert_eq!(published(&a, "changed_by").as_deref(), Some("unknown"));
+    let a = c.on_frame(3000, &area_status(AREA_DISARMED));
+    assert_eq!(published(&a, "changed_by"), None, "announced once per boot");
+}
+
+#[test]
+fn changed_by_survives_message_before_or_after_the_mode_change() {
+    // Message first, status second.
+    let mut c = core(false);
+    c.on_frame(0, &area_status(AREA_DISARMED));
+    c.on_frame(1000, &switch_msg(0x0531, 0x62, "GMS"));
+    c.on_frame(3000, &area_status(AREA_INTERN));
+    assert_eq!(
+        published(&c.on_tick(3000 + PAST_WINDOW), "changed_by"),
+        None
+    );
+
+    // Status first, message second.
+    let mut c = core(false);
+    c.on_frame(0, &area_status(AREA_DISARMED));
+    c.on_frame(1000, &switch_msg(0x0531, 0x62, "GMS"));
+    c.on_frame(3000, &area_status(AREA_INTERN));
+    c.on_frame(20_000, &area_status(AREA_DISARMED));
+    let a = c.on_frame(21_000, &switch_msg(0x0530, 0xE1, "Berechtigung 8"));
+    assert_eq!(
+        published(&a, "changed_by").as_deref(),
+        Some("Berechtigung 8")
+    );
+    assert_eq!(
+        published(&c.on_tick(21_000 + PAST_WINDOW), "changed_by"),
+        None
+    );
+}
+
+#[test]
+fn changed_by_cleared_when_mode_changes_without_message() {
+    let mut c = core(false);
+    c.on_frame(0, &area_status(AREA_DISARMED));
+    c.on_frame(1000, &switch_msg(0x0531, 0x62, "GMS"));
+    c.on_frame(3000, &area_status(AREA_INTERN));
+
+    // Disarmed at the panel, but no message reaches us.
+    let t = 30_000;
+    c.on_frame(t, &area_status(AREA_DISARMED));
+    assert_eq!(
+        published(&c.on_tick(t + CHANGED_BY_WINDOW_MS), "changed_by"),
+        None,
+        "still inside the pairing window"
+    );
+    assert_eq!(
+        published(&c.on_tick(t + CHANGED_BY_WINDOW_MS + 1), "changed_by").as_deref(),
+        Some("unknown")
+    );
+    assert_eq!(
+        published(&c.on_tick(t + CHANGED_BY_WINDOW_MS + 2), "changed_by"),
+        None,
+        "cleared once"
+    );
+}
+
+#[test]
+fn changed_by_kept_across_alarm_and_night_flag() {
+    let mut c = core(false);
+    c.on_frame(0, &area_status(AREA_DISARMED));
+    c.on_frame(1000, &switch_msg(0x0532, 0x61, "Berechtigung 7"));
+    c.on_frame(3000, &area_status(AREA_EXTERN));
+    // Alarm and back to armed-away: no mode change.
+    c.on_frame(6000, &area_status(AREA_ALARM));
+    assert_eq!(c.arm_state(), ArmState::Triggered);
+    c.on_frame(9000, &area_status(AREA_EXTERN));
+    assert_eq!(
+        published(&c.on_tick(9000 + PAST_WINDOW), "changed_by"),
+        None
+    );
+
+    // armed_home → armed_night is the same panel mode.
+    let mut c = core(false);
+    c.on_frame(0, &area_status(AREA_DISARMED));
+    c.on_frame(1000, &switch_msg(0x0531, 0x62, "GMS"));
+    c.on_frame(3000, &area_status(AREA_INTERN));
+    c.restore_night_flag(true);
+    c.on_frame(6000, &area_status(AREA_INTERN));
+    assert_eq!(c.arm_state(), ArmState::ArmedNight);
+    assert_eq!(
+        published(&c.on_tick(6000 + PAST_WINDOW), "changed_by"),
+        None
+    );
+}
+
+#[test]
+fn changed_by_cleared_on_serial_outage() {
+    let mut c = core(false);
+    c.on_frame(0, &area_status(AREA_DISARMED));
+    c.on_frame(1000, &switch_msg(0x0531, 0x62, "GMS"));
+    let a = c.on_tick(1000 + SERIAL_DEADLINE_MS + 1);
+    assert_eq!(c.availability(), Availability::Unavailable);
+    assert_eq!(published(&a, "changed_by").as_deref(), Some("unknown"));
+}
+
+#[test]
+fn changed_by_reset_message_is_anticipated() {
+    // Not capture-verified: a reset message (0x52) with a text sets changed_by and is logged.
+    let mut c = core(false);
+    c.on_frame(0, &area_status(AREA_ALARM));
+    let a = c.on_frame(1000, &switch_msg(0x0533, 0x52, "Berechtigung 3"));
+    assert_eq!(
+        published(&a, "changed_by").as_deref(),
+        Some("Berechtigung 3")
+    );
+    assert!(a
+        .iter()
+        .any(|a| matches!(a, Action::Log(m) if m.contains("Rücksetz-Meldung"))));
+}
+
+#[test]
+fn changed_by_ignores_other_messages_and_missing_text() {
+    let mut c = core(false);
+    c.on_frame(0, &area_status(AREA_DISARMED));
+    // Intrusion message with the detector name as text: not a switching source.
+    let a = c.on_frame(1000, &switch_msg(0x0075, 0x22, "MA-MG02"));
+    assert_eq!(published(&a, "changed_by"), None);
+    // Switching message without / with a blank ASCII record.
+    let a = c.on_frame(2000, &ndat(&meldung_rec(0x0531, 0x62)));
+    assert_eq!(published(&a, "changed_by"), None);
+    let a = c.on_frame(3000, &switch_msg(0x0531, 0x62, "    "));
+    assert_eq!(published(&a, "changed_by"), None);
+}
+
+#[test]
+fn changed_by_is_republished_after_mqtt_recovery() {
+    let mut c = core(false);
+    c.on_frame(0, &area_status(AREA_DISARMED));
+    c.on_frame(1000, &switch_msg(0x0531, 0x62, "GMS"));
+    let mut seen = None;
+    c.republish_for_each(&mut |a| {
+        if let Action::Publish { topic, payload, .. } = a {
+            if topic == "changed_by" {
+                seen = Some(payload);
+            }
+        }
+    });
+    assert_eq!(seen.as_deref(), Some("GMS"));
+}
+
+// --- triggered_by -----------------------------------------------------------
+
+#[test]
+fn triggered_by_names_the_detector_and_clears_after_the_alarm() {
+    let mut c = core(false);
+    // First known state overwrites whatever a previous run left retained.
+    let a = c.on_frame(0, &area_status(AREA_EXTERN));
+    assert_eq!(published(&a, "triggered_by").as_deref(), Some("none"));
+
+    // The alarm message may precede the status telegram that shows the alarm bit.
+    let a = c.on_frame(1000, &switch_msg(0x0075, 0x22, "MA-MG02"));
+    assert_eq!(
+        published(&a, "triggered_by").as_deref(),
+        Some("Einbruch: MA-MG02")
+    );
+    let a = c.on_frame(3000, &area_status(AREA_ALARM));
+    assert_eq!(c.arm_state(), ArmState::Triggered);
+    assert_eq!(published(&a, "triggered_by"), None);
+
+    // Follow-up detectors of the same alarm do not replace the first cause.
+    let a = c.on_frame(4000, &switch_msg(0x0076, 0x22, "MA-MG03"));
+    assert_eq!(published(&a, "triggered_by"), None);
+    assert_eq!(published(&a, "event").as_deref(), Some("Einbruch@0x0076"));
+
+    let a = c.on_frame(6000, &area_status(AREA_DISARMED));
+    assert_eq!(published(&a, "triggered_by").as_deref(), Some("none"));
+}
+
+#[test]
+fn triggered_by_without_text_falls_back_to_the_address() {
+    let mut c = core(false);
+    let a = c.on_frame(0, &ndat(&meldung_rec(0x0075, 0x23)));
+    assert_eq!(
+        published(&a, "triggered_by").as_deref(),
+        Some("Sabotage@0x0075")
+    );
+}
+
+#[test]
+fn triggered_by_stale_cause_outside_an_alarm_is_replaced_and_cleared_on_switch() {
+    let mut c = core(false);
+    c.on_frame(0, &area_status(AREA_DISARMED));
+    // Sabotage while disarmed never reaches TRIGGERED here: the cause stays readable …
+    c.on_frame(1000, &switch_msg(0x0075, 0x23, "Deckel"));
+    // … but must not block the next one,
+    let a = c.on_frame(2000, &switch_msg(0x0076, 0x22, "MA-MG03"));
+    assert_eq!(
+        published(&a, "triggered_by").as_deref(),
+        Some("Einbruch: MA-MG03")
+    );
+    // and the next switch drops it.
+    let a = c.on_frame(3000, &area_status(AREA_INTERN));
+    assert_eq!(published(&a, "triggered_by").as_deref(), Some("none"));
+}
+
+#[test]
+fn triggered_by_is_unknown_when_started_mid_alarm_or_offline() {
+    let mut c = core(false);
+    let a = c.on_frame(0, &area_status(AREA_ALARM));
+    assert_eq!(published(&a, "triggered_by").as_deref(), Some("unknown"));
+    let a = c.on_frame(3000, &area_status(AREA_DISARMED));
+    assert_eq!(published(&a, "triggered_by").as_deref(), Some("none"));
+
+    c.on_frame(4000, &switch_msg(0x0075, 0x22, "MA-MG02"));
+    let a = c.on_tick(4000 + SERIAL_DEADLINE_MS + 1);
+    assert_eq!(c.availability(), Availability::Unavailable);
+    assert_eq!(published(&a, "triggered_by").as_deref(), Some("unknown"));
+
+    let mut seen = None;
+    c.republish_for_each(&mut |a| {
+        if let Action::Publish { topic, payload, .. } = a {
+            if topic == "triggered_by" {
+                seen = Some(payload);
+            }
+        }
+    });
+    assert_eq!(seen, None, "nothing to republish until the next status");
+}
+
+// --- unhandled spontaneous messages -----------------------------------------
+
+fn logs(actions: &[Action]) -> Vec<&str> {
+    actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::Log(l) if l.starts_with("Unverarbeitete Meldung") => Some(l.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn unhandled_message_is_logged_once_per_type() {
+    let mut c = core(false);
+    // Unknown message type 0x45 with a text.
+    let a = c.on_frame(0, &switch_msg(0x0123, 0x45, "Irgendwas"));
+    let l = logs(&a);
+    assert_eq!(l.len(), 1);
+    assert!(l[0].contains("0x45") && l[0].contains("@0x0123") && l[0].contains("Irgendwas"));
+    // Same type again (other address): silent — a chatty panel cannot flood the ring log.
+    for addr in 0x0124..0x0224 {
+        assert!(logs(&c.on_frame(1, &switch_msg(addr, 0x45, "Irgendwas"))).is_empty());
+    }
+    // The withdrawal (bit 7) is its own type: an alarm going away is logged once.
+    assert_eq!(
+        logs(&c.on_frame(2, &ndat(&meldung_rec(0x0075, 0xA2)))).len(),
+        1
+    );
+    assert!(logs(&c.on_frame(3, &ndat(&meldung_rec(0x0075, 0xA2)))).is_empty());
+}
+
+#[test]
+fn handled_messages_are_not_logged_as_unhandled() {
+    let mut c = core(false);
+    for frame in [
+        switch_msg(0x0075, 0x22, "MA-MG02"), // alarm → event + triggered_by
+        switch_msg(0x0531, 0x62, "GMS"),     // switching source → changed_by
+        ndat(&meldung_rec(0x0001, 0x33)),    // battery fault → diag/akku
+        ndat(&meldung_rec(0xFFFF, 0x53)),    // restart
+    ] {
+        assert!(logs(&c.on_frame(0, &frame)).is_empty());
+    }
+    // A switching message WITHOUT its text carries no source: worth a log line.
+    assert_eq!(
+        logs(&c.on_frame(0, &ndat(&meldung_rec(0x0531, 0x62)))).len(),
+        1
+    );
 }
