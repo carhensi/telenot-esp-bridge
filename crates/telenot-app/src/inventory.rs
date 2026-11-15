@@ -54,12 +54,12 @@ pub fn inventory_for_each(config: &Config, emit: &mut dyn FnMut(&str, &str)) {
         return;
     }
     let chunk_count = confirmed.div_ceil(INVENTORY_CHUNK_ENTITIES);
-    // 3 fixed entities (alarm + 2 readiness, chunk 0 only) + confirmed sensors.
+    // 4 fixed entities (alarm + 2 readiness + changed_by, chunk 0 only) + confirmed sensors.
     let envelope = format!(
         "{{\"schema_version\":{},\"chunked\":true,\"chunk_count\":{},\"entities_total\":{}}}",
         telenot_config::CURRENT_SCHEMA_VERSION,
         chunk_count,
-        confirmed + 3
+        confirmed + 4
     );
     emit("inventory", &envelope);
     for i in 0..chunk_count {
@@ -77,7 +77,7 @@ pub fn inventory_for_each(config: &Config, emit: &mut dyn FnMut(&str, &str)) {
 /// With `skip=0, take=all, chunked_of=None` the output is byte-identical to the historic
 /// `inventory_payload` (v1 contract). With `chunked_of=Some((i, n))` the fields
 /// `"chunk":i,"chunk_count":n` are inserted directly after `device_id` (before `entities`).
-/// The fixed entities (alarm + readiness) are emitted only for `skip == 0`, i.e. exactly once
+/// The fixed entities (alarm + readiness + changed_by) are emitted only for `skip == 0`, i.e. exactly once
 /// across all chunks.
 fn payload_slice(
     config: &Config,
@@ -137,6 +137,17 @@ fn payload_slice(
                 }),
             );
         }
+
+        // Source of the last arm/disarm (panel text).
+        push(
+            &mut buf,
+            json!({
+                "id": format!("{device_id}_changed_by"),
+                "name": "Zuletzt geschaltet von",
+                "platform": "sensor",
+                "state_topic": "changed_by",
+            }),
+        );
     }
 
     // Confirmed sensors in the requested window.
@@ -204,8 +215,8 @@ mod tests {
         let v: Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(v["device_id"], "telenot-bridge");
         let ents = v["entities"].as_array().unwrap();
-        // alarm + 2 readiness + 2 confirmed (unconfirmed is excluded)
-        assert_eq!(ents.len(), 5);
+        // alarm + 2 readiness + changed_by + 2 confirmed (unconfirmed is excluded)
+        assert_eq!(ents.len(), 6);
 
         let alarm = ents
             .iter()
@@ -291,7 +302,7 @@ mod tests {
         assert_eq!(env["schema_version"], CURRENT_SCHEMA_VERSION);
         assert_eq!(env["chunked"], true);
         assert_eq!(env["chunk_count"], 4);
-        assert_eq!(env["entities_total"], 203); // 200 confirmed + alarm + 2 readiness
+        assert_eq!(env["entities_total"], 204); // 200 confirmed + alarm + 2 readiness + changed_by
 
         let mut ids: Vec<String> = Vec::new();
         for (i, (topic, payload)) in emits[1..].iter().enumerate() {
@@ -309,13 +320,14 @@ mod tests {
                 ids.push(e["id"].as_str().unwrap().to_string());
             }
         }
-        // All entities exactly once across the chunks (200 sensors + 3 fixed in chunk 0).
-        assert_eq!(ids.len(), 203);
+        // All entities exactly once across the chunks (200 sensors + 4 fixed in chunk 0).
+        assert_eq!(ids.len(), 204);
         let unique: std::collections::BTreeSet<&String> = ids.iter().collect();
-        assert_eq!(unique.len(), 203, "no entity may appear twice");
+        assert_eq!(unique.len(), 204, "no entity may appear twice");
         for i in 0..200usize {
             assert!(ids.contains(&format!("telenot-bridge_{:04x}", 0x0100 + i)));
         }
         assert!(ids.contains(&"telenot-bridge_alarm".to_string()));
+        assert!(ids.contains(&"telenot-bridge_changed_by".to_string()));
     }
 }

@@ -11,6 +11,7 @@ teilen können.
 | relativ | Richtung | Payload | retain |
 |---|---|---|---|
 | `state` | out | Arm-Zustand (s.u.) | ja |
+| `changed_by` | out | Quelle der letzten Scharf-/Unscharfschaltung laut Zentrale (s.u.) oder `unknown` | ja |
 | `availability` | out | `online` \| `offline` | ja |
 | `<sensor.topic>` | out | `ON` \| `OFF` \| `unavailable` | ja |
 | `event` | out | spontane Alarme/Sabotage/Störungen (`<Art>@0x<addr>=ein\|aus`) | nein |
@@ -29,6 +30,7 @@ teilen können.
 |---|---|---|---|
 | `area/<id>/state` | out | Arm-Zustand des Sicherungsbereichs `id` (1–15, 16 = Zentralen-Schutzbereich) | ja |
 | `area/<id>/ready/intern` · `…/extern` | out | `yes` \| `no` je Bereich (statt Top-Level `ready/*`) | ja |
+| `area/<id>/changed_by` | out | wie `changed_by`, je Bereich (Top-Level `changed_by` folgt Bereich 1) | ja |
 | `area/<id>/command` | **in** | wie `command`; Arm-Befehle wirken auf Bereich `id` | nein |
 
 `state` (Top-Level) ist bei Multi-Bereich das **Schwere-Aggregat** (TRIGGERED >
@@ -47,6 +49,33 @@ Bereich 1. Arm-Befehle akzeptieren zusätzlich ein `area`-Feld (1–16) im JSON.
 - Wird **ausschließlich aus dem zyklischen Blockstatus** abgeleitet (Snapshot = Wahrheit),
   nie optimistisch aus einem gesendeten Befehl.
 - `unavailable`/`unknown` bei Serial-Stille (Fail-Safe), nie veraltet „DISARMED".
+
+## Schaltquelle (`changed_by`)
+
+Wer oder was zuletzt scharf/unscharf geschaltet hat — der **unveränderte Text der Zentrale**
+aus ihrer spontanen Scharf-/Unscharf-Meldung (Satz 0x02 mit Textsatz 0x54):
+
+| Payload | Bedeutung |
+|---|---|
+| `GMS` | Schaltung über die GMS-Schnittstelle, also über diese Bridge (MQTT/REST/HomeKit) |
+| `Berechtigung <n>` | Schaltung an der Anlage mit Code/Transponder der Berechtigung n |
+| `unknown` | nicht bekannt (s.u.) |
+
+- **Reine Annotation.** Der Arm-Zustand kommt weiter ausschließlich aus dem Blockstatus;
+  `changed_by` beeinflusst ihn nie.
+- **Berechtigung, nicht Bedienteil.** Die Zentrale meldet, *welche Berechtigung* geschaltet
+  hat — an welchem Bedienteil/Leser, steht nicht im Telegramm.
+- **Publiziert bei jeder Schaltmeldung**, auch mit unverändertem Text (zwei Schaltungen
+  derselben Quelle sind zwei Ereignisse).
+- **`unknown` statt veraltet:** nach dem Start der Bridge, bei Serial-Ausfall und wenn der
+  Zustand zwischen unscharf/intern/extern wechselt, ohne dass innerhalb von 6 s davor oder
+  danach eine Schaltmeldung kam. Ein Alarm (`TRIGGERED`) lässt den Wert stehen.
+- **Nicht atomar mit `state`:** Meldung und Blockstatus sind getrennte Telegramme. Wer auf
+  `state` triggert und die Quelle braucht, wartet kurz oder triggert direkt auf `changed_by`.
+- **Belegt** (reale Mitschnitte, complex 400): intern/extern scharf und unscharf.
+  **Unverifiziert:** Alarm-Rücksetzen (eine Rücksetz-Meldung 0x52 mit Text wird übernommen und
+  im Diagnose-Log vermerkt), Schlüsselschalter/Zeitsteuerung (Text wird roh durchgereicht) und
+  die hiplex (Topic erscheint, falls sie solche Meldungen sendet; bis dahin keine HA-Entity).
 
 ## Command (`command`, eingehend)
 
@@ -157,12 +186,12 @@ ein kompakter **Envelope** publiziert und die Entities auf retained Chunk-Topics
 (64 bestätigte Entities pro Chunk):
 
 ```json
-{ "schema_version": 1, "chunked": true, "chunk_count": 4, "entities_total": 203 }
+{ "schema_version": 1, "chunked": true, "chunk_count": 4, "entities_total": 204 }
 ```
 
 - `inventory/chunk/0` … `inventory/chunk/<chunk_count-1>` (retained): gleiche Struktur wie der
   v1-Payload, plus die Felder `"chunk": <i>, "chunk_count": <N>` direkt nach `device_id`
-  (vor `entities`). Die festen Entities (Alarmzustand + Scharf-bereit) stehen genau einmal —
+  (vor `entities`). Die festen Entities (Alarmzustand + Scharf-bereit + `changed_by`) stehen genau einmal —
   in Chunk 0. `entities_total` zählt alle Entities über alle Chunks (inkl. der festen).
 - **Konsumenten-Regel:** Maßgeblich ist `chunk_count` aus dem Envelope. Verwaiste ältere
   `inventory/chunk/…`-Topics (z. B. retained Reste von vor einem Reboot mit größerem Inventar)

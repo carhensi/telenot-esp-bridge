@@ -206,6 +206,27 @@ pub fn discovery_for_each(config: &Config, o: &DiscoveryOpts, emit: &mut dyn FnM
                 retain: true,
             });
         }
+
+        // Who/what switched last: the panel's own text ("GMS", "Berechtigung 7").
+        // `force_update` keeps two switches in a row by the same source two events.
+        // Single-area only — whether multi-area panels send it is not capture-verified.
+        emit(DiscoveryMsg {
+            topic: format!(
+                "{}/sensor/{}/{}_changed_by/config",
+                o.discovery_prefix, HA_ID, HA_ID
+            ),
+            payload: json!({
+                "name": "Zuletzt geschaltet von",
+                "unique_id": format!("{}_changed_by", HA_ID),
+                "state_topic": format!("{}/changed_by", o.topic_root),
+                "icon": "mdi:account-key",
+                "force_update": true,
+                "availability": avail,
+                "device": dev,
+            })
+            .to_string(),
+            retain: true,
+        });
     } else {
         // Multi-area panel (hiplex): read-only aggregate + one panel entity per area.
         // The aggregate carries no command topic — commands go through the per-area
@@ -493,6 +514,8 @@ mod tests {
         assert!(!msgs
             .iter()
             .any(|m| m.payload.contains("\"telenot/v1/ready/intern\"")));
+        // changed_by is not capture-verified on multi-area panels: no entity yet.
+        assert!(!msgs.iter().any(|m| m.topic.contains("changed_by")));
     }
 
     #[test]
@@ -511,8 +534,18 @@ mod tests {
     fn builds_valid_discovery() {
         let o = DiscoveryOpts::new("telenot/v1");
         let msgs = discovery_messages(&cfg(), &o);
-        // alarm + 2 readiness + 2 confirmed (unconfirmed is excluded)
-        assert_eq!(msgs.len(), 5);
+        // alarm + 2 readiness + changed_by + 2 confirmed (unconfirmed is excluded)
+        assert_eq!(msgs.len(), 6);
+
+        let cb = msgs
+            .iter()
+            .find(|m| {
+                m.topic == "homeassistant/sensor/telenot-bridge/telenot-bridge_changed_by/config"
+            })
+            .expect("changed_by sensor");
+        let v: Value = serde_json::from_str(&cb.payload).unwrap();
+        assert_eq!(v["state_topic"], "telenot/v1/changed_by");
+        assert_eq!(v["force_update"], true);
 
         let mk = msgs
             .iter()

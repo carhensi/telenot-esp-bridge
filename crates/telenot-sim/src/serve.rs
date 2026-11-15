@@ -303,6 +303,24 @@ impl Transport for MockTransport {
                         ART_AUSGANG_AUS, ART_AUSGANG_EIN, ART_EXTERN_SCHARF, ART_INTERN_SCHARF,
                         ART_MB_ENTSPERREN, ART_MB_SPERREN, ART_UNSCHARF,
                     };
+                    // Like the real panel: an arm/disarm is announced by a spontaneous
+                    // message naming its source as text — "GMS" for this interface. Only
+                    // on an actual mode change, so a re-sent command stays one event.
+                    let target = match m.meldungsart {
+                        ART_INTERN_SCHARF => Some(MockArm::Intern),
+                        ART_EXTERN_SCHARF => Some(MockArm::Extern),
+                        ART_UNSCHARF => Some(MockArm::Disarmed),
+                        _ => None,
+                    };
+                    if target.is_some_and(|t| t != self.arm) {
+                        let a = m.address();
+                        let mut recs = record(
+                            satztyp::MELDUNG,
+                            &[0x00, (a >> 8) as u8, a as u8, 0x01, m.meldungsart],
+                        );
+                        recs.extend(record(satztyp::ASCII, b"GMS             "));
+                        self.pending.push_back(ndat(&recs));
+                    }
                     match m.meldungsart {
                         ART_INTERN_SCHARF => self.arm = MockArm::Intern,
                         ART_EXTERN_SCHARF => self.arm = MockArm::Extern,

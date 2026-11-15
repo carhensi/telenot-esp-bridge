@@ -32,6 +32,10 @@ Mehr-Bereich und einzelne Steuer-Features, die der Protokoll-Layer bereits träg
 - **Zone-Bypass** (0x51/0xD1 @ 0x05F0+): `BYPASS_ON/OFF` (`mb` 1–128), Sperren fail-closed
   wie Disarm, Entsperren frei; Readback `mb/<n>/bypassed` aus 0x05F0+ (am realen Snapshot
   verifiziert: MB8). HA-Discovery-Entities folgen mit dem Inventory-Ausbau.
+- **Schaltquelle `changed_by`** (Textsatz 0x54 an der spontanen Scharf-/Unscharf-Meldung):
+  `GMS` bzw. `Berechtigung <n>` als retained MQTT-Topic + HA-Sensor; reine Annotation, der
+  Arm-Zustand bleibt Blockstatus-only. An realen Mitschnitten belegt für scharf/unscharf;
+  Rücksetzen (0x52) ist antizipiert und unverifiziert (Details: [MQTT-Contract](MQTT-CONTRACT.md)).
 - **Datum/Zeit stellen** (0x50): volle Befehls-Transaktion, weicht
   Arm-Befehlen aus; die Firmware stellt nach SNTP-Sync/Zentralen-Neustart die
   **lokale** Zeit (Wochentag Mo=0).
