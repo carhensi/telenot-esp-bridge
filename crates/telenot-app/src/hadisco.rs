@@ -227,6 +227,25 @@ pub fn discovery_for_each(config: &Config, o: &DiscoveryOpts, emit: &mut dyn FnM
             .to_string(),
             retain: true,
         });
+
+        // Alarm cause: message type + the panel's text of the detection point that
+        // triggered ("Einbruch: MA-MG02"); `none` outside an alarm.
+        emit(DiscoveryMsg {
+            topic: format!(
+                "{}/sensor/{}/{}_triggered_by/config",
+                o.discovery_prefix, HA_ID, HA_ID
+            ),
+            payload: json!({
+                "name": "Alarm ausgelöst durch",
+                "unique_id": format!("{}_triggered_by", HA_ID),
+                "state_topic": format!("{}/triggered_by", o.topic_root),
+                "icon": "mdi:alarm-light",
+                "availability": avail,
+                "device": dev,
+            })
+            .to_string(),
+            retain: true,
+        });
     } else {
         // Multi-area panel (hiplex): read-only aggregate + one panel entity per area.
         // The aggregate carries no command topic — commands go through the per-area
@@ -516,6 +535,7 @@ mod tests {
             .any(|m| m.payload.contains("\"telenot/v1/ready/intern\"")));
         // changed_by is not capture-verified on multi-area panels: no entity yet.
         assert!(!msgs.iter().any(|m| m.topic.contains("changed_by")));
+        assert!(!msgs.iter().any(|m| m.topic.contains("triggered_by")));
     }
 
     #[test]
@@ -534,8 +554,17 @@ mod tests {
     fn builds_valid_discovery() {
         let o = DiscoveryOpts::new("telenot/v1");
         let msgs = discovery_messages(&cfg(), &o);
-        // alarm + 2 readiness + changed_by + 2 confirmed (unconfirmed is excluded)
-        assert_eq!(msgs.len(), 6);
+        // alarm + 2 readiness + changed_by + triggered_by + 2 confirmed (unconfirmed is excluded)
+        assert_eq!(msgs.len(), 7);
+
+        let tb = msgs
+            .iter()
+            .find(|m| {
+                m.topic == "homeassistant/sensor/telenot-bridge/telenot-bridge_triggered_by/config"
+            })
+            .expect("triggered_by sensor");
+        let v: Value = serde_json::from_str(&tb.payload).unwrap();
+        assert_eq!(v["state_topic"], "telenot/v1/triggered_by");
 
         let cb = msgs
             .iter()

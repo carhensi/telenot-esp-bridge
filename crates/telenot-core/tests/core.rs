@@ -1266,3 +1266,132 @@ fn changed_by_is_republished_after_mqtt_recovery() {
     });
     assert_eq!(seen.as_deref(), Some("GMS"));
 }
+
+// --- triggered_by -----------------------------------------------------------
+
+#[test]
+fn triggered_by_names_the_detector_and_clears_after_the_alarm() {
+    let mut c = core(false);
+    // First known state overwrites whatever a previous run left retained.
+    let a = c.on_frame(0, &area_status(AREA_EXTERN));
+    assert_eq!(published(&a, "triggered_by").as_deref(), Some("none"));
+
+    // The alarm message may precede the status telegram that shows the alarm bit.
+    let a = c.on_frame(1000, &switch_msg(0x0075, 0x22, "MA-MG02"));
+    assert_eq!(
+        published(&a, "triggered_by").as_deref(),
+        Some("Einbruch: MA-MG02")
+    );
+    let a = c.on_frame(3000, &area_status(AREA_ALARM));
+    assert_eq!(c.arm_state(), ArmState::Triggered);
+    assert_eq!(published(&a, "triggered_by"), None);
+
+    // Follow-up detectors of the same alarm do not replace the first cause.
+    let a = c.on_frame(4000, &switch_msg(0x0076, 0x22, "MA-MG03"));
+    assert_eq!(published(&a, "triggered_by"), None);
+    assert_eq!(published(&a, "event").as_deref(), Some("Einbruch@0x0076"));
+
+    let a = c.on_frame(6000, &area_status(AREA_DISARMED));
+    assert_eq!(published(&a, "triggered_by").as_deref(), Some("none"));
+}
+
+#[test]
+fn triggered_by_without_text_falls_back_to_the_address() {
+    let mut c = core(false);
+    let a = c.on_frame(0, &ndat(&meldung_rec(0x0075, 0x23)));
+    assert_eq!(
+        published(&a, "triggered_by").as_deref(),
+        Some("Sabotage@0x0075")
+    );
+}
+
+#[test]
+fn triggered_by_stale_cause_outside_an_alarm_is_replaced_and_cleared_on_switch() {
+    let mut c = core(false);
+    c.on_frame(0, &area_status(AREA_DISARMED));
+    // Sabotage while disarmed never reaches TRIGGERED here: the cause stays readable …
+    c.on_frame(1000, &switch_msg(0x0075, 0x23, "Deckel"));
+    // … but must not block the next one,
+    let a = c.on_frame(2000, &switch_msg(0x0076, 0x22, "MA-MG03"));
+    assert_eq!(
+        published(&a, "triggered_by").as_deref(),
+        Some("Einbruch: MA-MG03")
+    );
+    // and the next switch drops it.
+    let a = c.on_frame(3000, &area_status(AREA_INTERN));
+    assert_eq!(published(&a, "triggered_by").as_deref(), Some("none"));
+}
+
+#[test]
+fn triggered_by_is_unknown_when_started_mid_alarm_or_offline() {
+    let mut c = core(false);
+    let a = c.on_frame(0, &area_status(AREA_ALARM));
+    assert_eq!(published(&a, "triggered_by").as_deref(), Some("unknown"));
+    let a = c.on_frame(3000, &area_status(AREA_DISARMED));
+    assert_eq!(published(&a, "triggered_by").as_deref(), Some("none"));
+
+    c.on_frame(4000, &switch_msg(0x0075, 0x22, "MA-MG02"));
+    let a = c.on_tick(4000 + SERIAL_DEADLINE_MS + 1);
+    assert_eq!(c.availability(), Availability::Unavailable);
+    assert_eq!(published(&a, "triggered_by").as_deref(), Some("unknown"));
+
+    let mut seen = None;
+    c.republish_for_each(&mut |a| {
+        if let Action::Publish { topic, payload, .. } = a {
+            if topic == "triggered_by" {
+                seen = Some(payload);
+            }
+        }
+    });
+    assert_eq!(seen, None, "nothing to republish until the next status");
+}
+
+// --- unhandled spontaneous messages -----------------------------------------
+
+fn logs(actions: &[Action]) -> Vec<&str> {
+    actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::Log(l) if l.starts_with("Unverarbeitete Meldung") => Some(l.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn unhandled_message_is_logged_once_per_type() {
+    let mut c = core(false);
+    // Unknown message type 0x45 with a text.
+    let a = c.on_frame(0, &switch_msg(0x0123, 0x45, "Irgendwas"));
+    let l = logs(&a);
+    assert_eq!(l.len(), 1);
+    assert!(l[0].contains("0x45") && l[0].contains("@0x0123") && l[0].contains("Irgendwas"));
+    // Same type again (other address): silent — a chatty panel cannot flood the ring log.
+    for addr in 0x0124..0x0224 {
+        assert!(logs(&c.on_frame(1, &switch_msg(addr, 0x45, "Irgendwas"))).is_empty());
+    }
+    // The withdrawal (bit 7) is its own type: an alarm going away is logged once.
+    assert_eq!(
+        logs(&c.on_frame(2, &ndat(&meldung_rec(0x0075, 0xA2)))).len(),
+        1
+    );
+    assert!(logs(&c.on_frame(3, &ndat(&meldung_rec(0x0075, 0xA2)))).is_empty());
+}
+
+#[test]
+fn handled_messages_are_not_logged_as_unhandled() {
+    let mut c = core(false);
+    for frame in [
+        switch_msg(0x0075, 0x22, "MA-MG02"), // alarm → event + triggered_by
+        switch_msg(0x0531, 0x62, "GMS"),     // switching source → changed_by
+        ndat(&meldung_rec(0x0001, 0x33)),    // battery fault → diag/akku
+        ndat(&meldung_rec(0xFFFF, 0x53)),    // restart
+    ] {
+        assert!(logs(&c.on_frame(0, &frame)).is_empty());
+    }
+    // A switching message WITHOUT its text carries no source: worth a log line.
+    assert_eq!(
+        logs(&c.on_frame(0, &ndat(&meldung_rec(0x0531, 0x62)))).len(),
+        1
+    );
+}

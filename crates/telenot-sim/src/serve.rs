@@ -186,6 +186,8 @@ struct MockTransport {
     outputs_on: std::collections::BTreeSet<u16>,
     /// Sim-only: "intrusion" triggered (via POST /sim/intrude) → when armed ⇒ alarm (0x0533).
     alarm: Arc<AtomicBool>,
+    /// The spontaneous intrusion message for the current alarm has been sent.
+    alarm_announced: bool,
     tick: u64,
 }
 
@@ -199,6 +201,7 @@ impl MockTransport {
             bypassed: std::collections::BTreeSet::new(),
             outputs_on: std::collections::BTreeSet::new(),
             alarm,
+            alarm_announced: false,
             tick: 0,
         }
     }
@@ -261,6 +264,21 @@ impl Transport for MockTransport {
         // send ONLY that — an additional unsolicited status SEND would otherwise collide with
         // the command ACK ("TIMEOUT: Kollision, Versuche erschöpft").
         // Otherwise the periodic status (keeps the core alive + carries arm/detector state).
+        // Like the real panel: an alarm is announced once by a spontaneous intrusion
+        // message naming the detection point as text (→ `triggered_by`).
+        let alarm = self.alarm.load(Ordering::Relaxed) && self.arm != MockArm::Disarmed;
+        if alarm && !self.alarm_announced {
+            if let Some((addr, name)) = self.seed.first() {
+                let mut recs = record(
+                    satztyp::MELDUNG,
+                    &[0x01, (addr >> 8) as u8, *addr as u8, 0x01, 0x22],
+                );
+                let text: String = name.chars().filter(char::is_ascii).take(16).collect();
+                recs.extend(record(satztyp::ASCII, format!("{text:<16}").as_bytes()));
+                self.pending.push_back(ndat(&recs));
+            }
+        }
+        self.alarm_announced = alarm;
         let mut out = send_norm_poll();
         if self.pending.is_empty() {
             out.extend(self.status_input());

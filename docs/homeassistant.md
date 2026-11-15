@@ -19,6 +19,7 @@ Mit `HA-Discovery = an` publiziert die Bridge nach `homeassistant/…`:
 | Scharf-intern-bereit | `binary_sensor` (safety) | `binary_sensor.telenot_bridge_scharf_intern_bereit` |
 | Scharf-extern-bereit | `binary_sensor` (safety) | `binary_sensor.telenot_bridge_scharf_extern_bereit` |
 | Zuletzt geschaltet von | `sensor` | `sensor.telenot_bridge_zuletzt_geschaltet_von` |
+| Alarm ausgelöst durch | `sensor` | `sensor.telenot_bridge_alarm_ausgelost_durch` |
 | je bestätigter Melder | `binary_sensor` (passende device_class) | `binary_sensor.telenot_bridge_<name>` |
 
 > **entity_id-Präfix:** Alle Entities hängen an **einem** Gerät „Telenot Bridge" → HA setzt
@@ -49,6 +50,10 @@ und Grenzen im [MQTT-Contract](MQTT-CONTRACT.md#schaltquelle-changed_by). Beispi
       data:
         message: "Anlage geschaltet durch {{ trigger.to_state.state }}"
 ```
+
+**Alarm ausgelöst durch** nennt bei einem Alarm den Auslöser laut Zentrale, z. B.
+`Einbruch: MA-MG02` (Meldungsart + Text des Meldepunkts); ohne Alarm `none`. Praktisch für die
+Push-Nachricht zum Alarm — Details im [MQTT-Contract](MQTT-CONTRACT.md#alarm-auslöser-triggered_by).
 
 ### Namen, Räume & Icons — Home Assistant ist führend
 
