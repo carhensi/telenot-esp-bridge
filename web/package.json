@@ -15,15 +15,15 @@
   },
   "dependencies": {
     "@noble/hashes": "2.4.0",
-    "preact": "^11.0.1",
+    "preact": "^11.2.0",
     "qrcode-generator": "^2.0.4"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@playwright/test": "^1.64.1",
+    "@playwright/test": "^1.65.0",
     "eslint": "^10.13.0",
     "eslint-plugin-react-hooks": "^7.1.1",
-    "vite": "^8.3.5",
+    "vite": "^8.3.8",
     "vite-plugin-singlefile": "^2.3.4"
   },
   "overrides": {
